@@ -1,0 +1,103 @@
+services:
+
+  db:
+    image: postgres:16-alpine
+    restart: always
+    environment:
+      POSTGRES_DB: ${DB_NAME:-trading_db}
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    restart: always
+    ports:
+      - "6379:6379"
+
+  web:
+    build: .
+    restart: always
+    command: >
+      sh -c "python manage.py migrate &&
+             python manage.py collectstatic --noinput &&
+             daphne -b 0.0.0.0 -p 8000 config.asgi:application"
+    volumes:
+      - .:/app
+      - static_volume:/app/staticfiles
+      - media_volume:/app/media
+    ports:
+      - "0.0.0.0:8000:8000"  # ← यहां 0.0.0.0 add किया
+    env_file: .env
+    depends_on:
+      - db
+      - redis
+    dns:  # ← DNS servers add किए
+      - 8.8.8.8
+      - 8.8.4.4
+    extra_hosts:  # ← Host access के लिए
+      - "host.docker.internal:host-gateway"
+
+  celery-orders:
+    build: .
+    restart: always
+    command: celery -A config worker -Q orders -c 2 -l info -E -n orders@%h
+    volumes:
+      - .:/app
+    env_file: .env
+    depends_on:
+      - db
+      - redis
+    dns:  # ← DNS add किया
+      - 8.8.8.8
+      - 8.8.4.4
+
+  celery-strategies:
+    build: .
+    restart: always
+    command: celery -A config worker -Q strategies,default -c 4 -l info -E -n strategies@%h
+    volumes:
+      - .:/app
+    env_file: .env
+    depends_on:
+      - db
+      - redis
+    dns:  # ← DNS add किया
+      - 8.8.8.8
+      - 8.8.4.4
+
+  celery-beat:
+    build: .
+    restart: always
+    command: celery -A config beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler
+    volumes:
+      - .:/app
+    env_file: .env
+    depends_on:
+      - db
+      - redis
+    dns:  # ← DNS add किया
+      - 8.8.8.8
+      - 8.8.4.4
+
+  flower:
+    image: mher/flower:2.0.0
+    restart: always
+    command: >
+      celery --broker=redis://redis:6379/1 flower --port=5555
+    ports:
+      - "5555:5555"
+    depends_on:
+      - redis
+    env_file: .env
+    environment:
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+
+volumes:
+  postgres_data:
+  static_volume:
+  media_volume:

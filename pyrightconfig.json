@@ -1,0 +1,29 @@
+{
+    "include": [
+        "apps",
+        "broker_adapters"
+    ],
+    "exclude": [
+        "env",
+        ".venv",
+        "node_modules",
+        "migrations"
+    ],
+    "pythonVersion": "3.11",
+    "typeCheckingMode": "basic",
+    "reportMissingImports": "warning",
+    "reportMissingModuleSource": "none",
+    "reportAttributeAccessIssue": "warning",
+    "reportOptionalMemberAccess": "warning",
+    "reportGeneralTypeIssues": "warning",
+    "reportArgumentType": "warning",
+    "reportCallIssue": "warning",
+    "reportOperatorIssue": "warning",
+    "reportReturnType": "warning",
+    "reportIndexIssue": "warning",
+    "reportOptionalOperand": "warning",
+    "reportAssignmentType": "warning",
+    "reportUnknownMemberType": "none",
+    "reportUnknownVariableType": "none",
+    "reportUnknownArgumentType": "none"
+}

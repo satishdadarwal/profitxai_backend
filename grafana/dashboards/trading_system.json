@@ -1,0 +1,54 @@
+{
+    "dashboard": {
+        "title": "ProfitX Trading System",
+        "panels": [
+            {
+                "title": "Tick Throughput",
+                "type": "graph",
+                "targets": [
+                    {
+                        "expr": "rate(tick_received_total[1m])",
+                        "legendFormat": "{{broker}} - {{symbol}}"
+                    }
+                ]
+            },
+            {
+                "title": "Tick-to-User Latency (p95)",
+                "type": "graph",
+                "targets": [
+                    {
+                        "expr": "histogram_quantile(0.95, tick_to_user_latency_ms)",
+                        "legendFormat": "{{broker}} p95"
+                    }
+                ]
+            },
+            {
+                "title": "Order Success Rate",
+                "type": "stat",
+                "targets": [
+                    {
+                        "expr": "sum(rate(order_placed_total{status='success'}[5m])) / sum(rate(order_placed_total[5m])) * 100"
+                    }
+                ]
+            },
+            {
+                "title": "Active Users",
+                "type": "stat",
+                "targets": [
+                    {
+                        "expr": "active_users"
+                    }
+                ]
+            },
+            {
+                "title": "Kill Switch Events",
+                "type": "table",
+                "targets": [
+                    {
+                        "expr": "kill_switch_triggered_total"
+                    }
+                ]
+            }
+        ]
+    }
+}

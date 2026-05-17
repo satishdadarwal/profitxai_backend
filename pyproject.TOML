@@ -1,0 +1,36 @@
+[tool.black]
+line-length = 88
+target-version = ["py311"]
+include = '\.pyi?$'
+exclude = '''
+/(
+    \.git
+  | \.venv
+  | venv
+  | env
+  | migrations
+  | __pycache__
+  | staticfiles
+  | media
+)/
+'''
+
+[tool.isort]
+profile = "black"
+line_length = 88
+skip = ["migrations", "venv", ".venv", "env", "__pycache__"]
+known_django = ["django"]
+known_third_party = ["rest_framework", "celery", "PIL"]
+known_first_party = ["apps", "config"]
+sections = ["FUTURE", "STDLIB", "DJANGO", "THIRDPARTY", "FIRSTPARTY", "LOCALFOLDER"]
+
+[tool.flake8]
+max-line-length = 88
+exclude = [
+    "migrations",
+    "venv",
+    ".venv",
+    "env",
+    "__pycache__",
+]
+extend-ignore = ["E203", "W503"]
