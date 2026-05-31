@@ -8,6 +8,10 @@
 # 5. _reconnect() mein None token fallback
 # 6. ✅ Market hours check — connection timeout gracefully handle karo
 # 7. ✅ Heartbeat improvements
+# 8. ✅ FIX: _get_access_token() — master account ko priority do
+#           Problem: Chanchal login kare to uska token feed ke liye pick ho sakta tha
+#           Fix: settings.FYERS_APP_ID wala account HAMESHA prefer karo
+#           Fallback: koi bhi active account (agar master na mile)
 
 import json
 import logging
@@ -30,7 +34,7 @@ _redis_lock = threading.Lock()
 KEEPALIVE_SYMBOL = "NSE:NIFTY50-INDEX"
 
 # ✅ Market hours configuration
-MARKET_OPEN_TIME = dt_time(9, 15)   # 9:15 AM
+MARKET_OPEN_TIME  = dt_time(9, 15)   # 9:15 AM
 MARKET_CLOSE_TIME = dt_time(15, 30)  # 3:30 PM
 
 
@@ -69,11 +73,8 @@ def _to_fyers_symbol(symbol: str) -> str:
 def _is_market_open() -> bool:
     """Check if current time is within market hours (Mon-Fri 9:15 AM - 3:30 PM)"""
     now = datetime.now()
-    
-    # Weekend check
     if now.weekday() >= 5:  # Saturday=5, Sunday=6
         return False
-    
     current_time = now.time()
     return MARKET_OPEN_TIME <= current_time <= MARKET_CLOSE_TIME
 
@@ -92,6 +93,11 @@ class FyersFeedManager:
         self._heartbeat_stop: threading.Event | None = None
         self._reconnect_attempts = 0
         self._max_reconnect_attempts = 3
+        # ✅ FIX: market group throttle — har tick pe broadcast band karo
+        # "8 of 11 channels over capacity in group market" fix
+        # Sirf 1 second mein ek baar market group ko bhejo
+        self._market_last_broadcast: dict[str, float] = {}  # symbol -> timestamp
+        self._market_broadcast_interval = 1.0  # seconds
 
     # ── Channel layer ─────────────────────────────────────────
     def _get_channel_layer(self):
@@ -99,11 +105,59 @@ class FyersFeedManager:
             self._channel_layer = get_channel_layer()
         return self._channel_layer
 
-    # ── Fyers token (DB se latest) ────────────────────────────
+    # ── ✅ FIX 8: Master account token — hamesha priority ─────
     def _get_access_token(self) -> str | None:
+        """
+        ✅ FIX 8: Master account ko HAMESHA prefer karo.
+
+        Problem jo thi:
+          - Chanchal login karta hai → BrokerAccount(user=chanchal, updated_at=now)
+          - _get_access_token() → order_by("-updated_at") → Chanchal ka account pick hota
+          - Master ka token feed ke liye use nahi hota
+          - Chanchal logout kare / token expire ho → feed band
+
+        Solution:
+          1. Pehle settings.FYERS_APP_ID wala account dhundo (master)
+          2. Wahan bhi na mile → koi bhi active account (graceful fallback)
+        """
         try:
             from apps.brokers.models import BrokerAccount
-            account = (
+            from django.conf import settings as django_settings
+
+            master_app_id = getattr(django_settings, "FYERS_APP_ID", "").strip()
+
+            # ── Step 1: Master account — app_id match karo ───
+            if master_app_id:
+                master_account = (
+                    BrokerAccount.objects
+                    .filter(
+                        broker="fyers",
+                        is_active=True,
+                        app_id=master_app_id,
+                    )
+                    .exclude(access_token__isnull=True)
+                    .exclude(access_token="")
+                    .order_by("-updated_at")
+                    .first()
+                )
+
+                if master_account:
+                    token = f"{master_account.app_id}:{master_account.access_token}"
+                    logger.info(
+                        "FyersFeed: ✅ Master account token loaded | "
+                        "account=%s | user=%s",
+                        master_account.id, master_account.user_id,
+                    )
+                    return token
+
+                logger.warning(
+                    "FyersFeed: ⚠️  Master account (app_id=%s) not found or no token — "
+                    "falling back to any active account",
+                    master_app_id,
+                )
+
+            # ── Step 2: Fallback — koi bhi active account ────
+            fallback_account = (
                 BrokerAccount.objects
                 .filter(broker="fyers", is_active=True)
                 .exclude(access_token__isnull=True)
@@ -111,15 +165,22 @@ class FyersFeedManager:
                 .order_by("-updated_at")
                 .first()
             )
-            if not account:
+
+            if not fallback_account:
                 logger.error("FyersFeed: No active Fyers account with token found")
                 return None
-            token = f"{account.app_id}:{account.access_token}"
-            logger.info(
-                "FyersFeed: Token loaded | account=%s | user=%s | is_verified=%s",
-                account.id, account.user_id, account.is_verified,
+
+            token = f"{fallback_account.app_id}:{fallback_account.access_token}"
+            logger.warning(
+                "FyersFeed: ⚠️  Using fallback account (NOT master) | "
+                "account=%s | user=%s | app_id=%s — "
+                "Set FYERS_APP_ID in .env and ensure master account is logged in.",
+                fallback_account.id,
+                fallback_account.user_id,
+                fallback_account.app_id,
             )
             return token
+
         except Exception as e:
             logger.error("FyersFeed: DB error getting token: %s", e)
             return None
@@ -165,6 +226,17 @@ class FyersFeedManager:
 
     # ── Token update ke baad WS restart ──────────────────────
     def restart_with_new_token(self, new_token: str):
+        """
+        ✅ FIX 8 extended: restart_with_new_token sirf master token pe hi karo.
+
+        Agar koi user login karta hai (Chanchal), uska token yahan nahi aana chahiye.
+        Ye method sirf views.py ke _start_feed_after_token() se call hoti hai,
+        jo sirf OAuth complete hone pe call hoti hai.
+
+        Lekin agar Chanchal login kare aur uska token yahan aaye,
+        toh _get_access_token() mein master check already sahi token return karega
+        next reconnect pe.
+        """
         logger.info("FyersFeed: restart_with_new_token — gracefully restarting WS")
 
         with self._lock:
@@ -197,23 +269,10 @@ class FyersFeedManager:
 
     # ── Ping — SDK ka apna __ping() use karo ─────────────────
     def _send_ping(self) -> bool:
-        """
-        Log se confirm hua ki SDK mein ye methods/attrs hain:
-          - _FyersDataSocket__ping   (SDK ka internal ping method)
-          - _FyersDataSocket__ws_object  (WebSocketApp — connect pe set hota hai)
-          - is_connected  (public bool)
-          - ping_thread   (SDK ka apna ping thread)
-
-        Strategy:
-          1. SDK ka __ping() directly call karo — safest
-          2. Fallback: __ws_object.sock pe binary frame bhejo
-        """
         fyers_obj = self._fyers
         if fyers_obj is None:
             return False
 
-        # ✅ SDK is_connected() sirf auth complete pe True hota hai.
-        # Apna self._connected flag use karo — onopen() pe set hota hai.
         if not self._connected:
             logger.debug("FyersFeed: Heartbeat — not connected yet, skipping")
             return False
@@ -241,12 +300,6 @@ class FyersFeedManager:
                     )
                     logger.debug("FyersFeed: Heartbeat — binary ping via ws_object ✅")
                     return True
-                else:
-                    logger.debug(
-                        "FyersFeed: Heartbeat — ws_object exists but sock not connected"
-                    )
-            else:
-                logger.debug("FyersFeed: Heartbeat — __ws_object is None (connecting...)")
         except Exception as e:
             logger.warning("FyersFeed: Heartbeat ws_object ping error: %s", e)
 
@@ -270,24 +323,18 @@ class FyersFeedManager:
 
         def _heartbeat_loop():
             logger.info("FyersFeed: Heartbeat thread started ✅")
-
-            # SDK ko is_connected=True karne do — pehle 3 sec wait
             _heartbeat_stop.wait(timeout=3)
             if not _heartbeat_stop.is_set():
                 result = self._send_ping()
                 logger.info(
                     "FyersFeed: First ping result=%s | self._connected=%s",
-                    result,
-                    self._connected,
+                    result, self._connected,
                 )
-
-            # Har 12 sec pe ping (Fyers 19 sec mein drop karta hai)
             while not _heartbeat_stop.is_set():
                 _heartbeat_stop.wait(timeout=12)
                 if _heartbeat_stop.is_set():
                     break
                 self._send_ping()
-
             logger.info("FyersFeed: Heartbeat thread stopped")
 
         def onmessage(msg):
@@ -295,10 +342,8 @@ class FyersFeedManager:
 
         def onerror(err):
             logger.error("FyersFeed WS error: %s", err)
-
             if isinstance(err, dict):
                 code = err.get("code")
-                # -99 = Token expired, -300 = Token invalid
                 if code in (-99, -300):
                     logger.warning(
                         "FyersFeed: Token error (code=%s) — triggering emergency refresh",
@@ -306,10 +351,8 @@ class FyersFeedManager:
                     )
                     _trigger_emergency_token_refresh()
                     return
-
-            # ✅ Market closed check — WinError 10060 expected after 3:30 PM
             if not _is_market_open():
-                logger.info("FyersFeed: Market is closed — connection error expected, stopping heartbeat")
+                logger.info("FyersFeed: Market is closed — connection error expected")
                 _heartbeat_stop.set()
                 with self._lock:
                     self._started = False
@@ -324,34 +367,31 @@ class FyersFeedManager:
                 self._connected = False
                 self._fyers = None
 
-            # ✅ Market closed check before reconnect
             if not _is_market_open():
-                logger.info(
-                    "FyersFeed: Market closed — will not attempt reconnect until market opens"
-                )
+                logger.info("FyersFeed: Market closed — not reconnecting")
                 self._reconnect_attempts = 0
                 return
 
             def _reconnect():
-                # Exponential backoff with limit
                 self._reconnect_attempts += 1
                 if self._reconnect_attempts > self._max_reconnect_attempts:
                     logger.warning(
                         "FyersFeed: Max reconnect attempts reached (%d) — giving up",
-                        self._max_reconnect_attempts
+                        self._max_reconnect_attempts,
                     )
                     self._reconnect_attempts = 0
                     return
-                
+
                 wait_time = min(5 * self._reconnect_attempts, 30)
                 logger.info(
                     "FyersFeed: Reconnect attempt %d/%d — waiting %ds",
-                    self._reconnect_attempts, 
+                    self._reconnect_attempts,
                     self._max_reconnect_attempts,
-                    wait_time
+                    wait_time,
                 )
                 time.sleep(wait_time)
-                
+
+                # ✅ FIX 8: Reconnect pe bhi master token use karo
                 fresh_token = self._get_access_token() or self._current_token
                 if fresh_token:
                     self.start(token=fresh_token)
@@ -362,8 +402,7 @@ class FyersFeedManager:
 
         def onopen():
             logger.info("FyersFeed: Fyers WS connected ✅")
-            self._reconnect_attempts = 0  # Reset on successful connect
-            
+            self._reconnect_attempts = 0
             with self._lock:
                 self._connected = True
                 symbols = list(self._subscribed)
@@ -389,22 +428,19 @@ class FyersFeedManager:
                     data_type="SymbolUpdate",
                 )
 
-            # Heartbeat start karo
             _heartbeat_stop.clear()
             hb_thread = threading.Thread(target=_heartbeat_loop, daemon=True)
             hb_thread.start()
 
         try:
-            # ✅ Market hours check before attempting connection
             if not _is_market_open():
                 logger.warning(
-                    "FyersFeed: Market is currently closed (Mon-Fri 9:15-15:30) — "
-                    "connection will fail. Marking as started but not attempting connect."
+                    "FyersFeed: Market is currently closed — not connecting."
                 )
                 with self._lock:
                     self._started = False
                 return
-            
+
             self._fyers = data_ws.FyersDataSocket(
                 access_token=token,
                 log_path="",
@@ -417,14 +453,12 @@ class FyersFeedManager:
                 on_message=onmessage,
             )
             self._fyers.connect()
-            
+
         except Exception as e:
             logger.error("FyersFeed: connect() failed: %s", e)
             with self._lock:
                 self._started = False
                 self._connected = False
-            
-            # ✅ Check market hours in exception case
             if not _is_market_open():
                 logger.info("FyersFeed: Connection failed — market is closed")
 
@@ -509,27 +543,32 @@ class FyersFeedManager:
                 return
 
             normalized = {
-                "symbol": symbol_raw,
-                "ltp": ltp,
-                "change": float(msg.get("ch", 0) or 0),
+                "symbol":    symbol_raw,
+                "ltp":       ltp,
+                "change":    float(msg.get("ch", 0) or 0),
                 "changePct": float(msg.get("chp", 0) or 0),
-                "open": float(msg.get("open_price", 0) or msg.get("o", 0) or 0),
-                "high": float(msg.get("high_price", 0) or msg.get("h", 0) or 0),
-                "low": float(msg.get("low_price", 0) or msg.get("l", 0) or 0),
-                "prevClose": float(
-                    msg.get("prev_close_price", 0) or msg.get("pc", 0) or 0
-                ),
-                "volume": float(msg.get("volume", 0) or msg.get("v", 0) or 0),
-                "bid": float(msg.get("bid", 0) or msg.get("bp1", 0) or 0),
-                "ask": float(msg.get("ask", 0) or msg.get("sp1", 0) or 0),
-                "ts": int(msg.get("exch_feed_time", 0) or 0),
+                "open":      float(msg.get("open_price", 0) or msg.get("o", 0) or 0),
+                "high":      float(msg.get("high_price", 0) or msg.get("h", 0) or 0),
+                "low":       float(msg.get("low_price", 0) or msg.get("l", 0) or 0),
+                "prevClose": float(msg.get("prev_close_price", 0) or msg.get("pc", 0) or 0),
+                "volume":    float(msg.get("volume", 0) or msg.get("v", 0) or 0),
+                "bid":       float(msg.get("bid", 0) or msg.get("bp1", 0) or 0),
+                "ask":       float(msg.get("ask", 0) or msg.get("sp1", 0) or 0),
+                "ts":        int(msg.get("exch_feed_time", 0) or 0),
             }
 
             logger.info("FyersFeed TICK ✅ | symbol=%s | ltp=%.2f", symbol_raw, ltp)
 
             group_name = _sanitize(symbol_raw)
             self._broadcast(group_name, "market_update", normalized)
-            self._broadcast("market", "market_update", normalized)
+            # ✅ FIX: market group throttle — 1s per symbol interval
+            # Prevents "X of Y channels over capacity in group market" warnings
+            # Per-symbol groups (symbol_*) still get every tick for precision
+            now = time.time()
+            last = self._market_last_broadcast.get(symbol_raw, 0)
+            if now - last >= self._market_broadcast_interval:
+                self._broadcast("market", "market_update", normalized)
+                self._market_last_broadcast[symbol_raw] = now
             self._update_asset_price(symbol_raw, ltp)
             self._check_sl_tp(symbol_raw, ltp)
             self._publish_to_redis(normalized)
@@ -572,21 +611,19 @@ class FyersFeedManager:
             asset, created = Asset.objects.get_or_create(
                 symbol=fyers_symbol,
                 defaults={
-                    "name": fyers_symbol,
-                    "exchange": exchange,
+                    "name":       fyers_symbol,
+                    "exchange":   exchange,
                     "asset_type": asset_type,
-                    "is_active": True,
+                    "is_active":  True,
                     "last_price": ltp_dec,
-                }
+                },
             )
-
             if not created:
                 Asset.objects.filter(pk=asset.pk).update(last_price=ltp_dec)
 
             symbol_suffix = fyers_symbol.split(":")[-1]
             PaperTrade.objects.filter(
-                status="open",
-                symbol=symbol_suffix,
+                status="open", symbol=symbol_suffix,
             ).update(current_price=ltp_dec)
 
         except Exception as e:
@@ -668,7 +705,7 @@ class FyersFeedManager:
                         )
                         logger.info(
                             "SL/TP hit | trade=%s | symbol=%s | reason=%s | exit=%.2f",
-                            trade.id, fyers_symbol, reason, float(exit_price)
+                            trade.id, fyers_symbol, reason, float(exit_price),
                         )
                     except Exception as e:
                         logger.error("close_trade failed | trade=%s | %s", trade.id, e)
@@ -680,13 +717,13 @@ class FyersFeedManager:
     def status(self) -> dict:
         fyers_is_connected = getattr(self._fyers, 'is_connected', None)
         return {
-            "started": self._started,
-            "connected": self._connected,
-            "fyers_alive": self._fyers is not None,
+            "started":           self._started,
+            "connected":         self._connected,
+            "fyers_alive":       self._fyers is not None,
             "fyers_is_connected": fyers_is_connected,
-            "subscribed": list(self._subscribed),
-            "sub_count": len(self._subscribed),
-            "token_set": bool(self._current_token),
+            "subscribed":        list(self._subscribed),
+            "sub_count":         len(self._subscribed),
+            "token_set":         bool(self._current_token),
             "heartbeat_running": (
                 self._heartbeat_stop is not None
                 and not self._heartbeat_stop.is_set()

@@ -110,13 +110,37 @@ class FyersAdapter(BaseBrokerAdapter):
 
     def get_funds(self) -> FundsInfo:
         resp = self._get(f"{self.BASE_URL}/api/v3/funds")
-        data = resp.get("data", {}) or resp.get("fund_limit", {})
+
+        # Fyers returns fund_limit as a LIST of {id, title, equityAmount, commodityAmount}
+        fund_limit = resp.get("fund_limit", [])
+
+        available = 0.0
+        used      = 0.0
+        total     = 0.0
+
+        if isinstance(fund_limit, list):
+            for item in fund_limit:
+                title  = item.get("title", "")
+                amount = float(item.get("equityAmount", 0) or 0)
+                if title == "Available Balance":
+                    available = amount
+                elif title == "Utilized Amount":
+                    used = amount
+                elif title == "Total Balance":
+                    total = amount
+            if total == 0:
+                total = available + used
+        elif isinstance(fund_limit, dict):
+            available = float(fund_limit.get("equity_amount", 0) or 0)
+            used      = float(fund_limit.get("utilized_amount", 0) or 0)
+            total     = float(fund_limit.get("total_amount", 0) or 0)
+
         return FundsInfo(
-            available=float(data.get("equity_amount", 0) or 0),
-            used=float(data.get("utilized_amount", 0) or 0),
-            total=float(data.get("total_amount", 0) or 0),
+            available=available,
+            used=used,
+            total=total,
             currency="INR",
-            raw=data,
+            raw=resp,
         )
 
     def get_positions(self) -> List[PositionInfo]:
@@ -245,7 +269,7 @@ class FyersAdapter(BaseBrokerAdapter):
         payload = {
             "symbol": symbol,
             "qty": int(qty),
-            "type": 1 if order_type == "market" else 2,  # 1=market, 2=limit
+            "type": 2 if order_type == "market" else 1,  # Fyers v3: 1=Limit, 2=Market, 3=SL, 4=SL-M
             "side": 1 if side == "buy" else -1,
             "productType": kwargs.get("product_type", "INTRADAY"),
             "limitPrice": price,

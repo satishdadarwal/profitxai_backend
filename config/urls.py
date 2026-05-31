@@ -235,7 +235,7 @@ urlpatterns = [
     # POST /api/v1/predictions/analyze/
 
     # ── Live Trading Signals (ICT Engine) ─────────────────────────────────────
-    path("api/live-trading/", include("apps.live_trading.urls")),
+    path(f"{API}live-trading/", include("apps.live_trading.urls")),
     # WebSocket: ws://api/live-trading/signals/
     # GET /api/live-trading/signals/recent/
 ]

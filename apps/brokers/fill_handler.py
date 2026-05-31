@@ -248,20 +248,24 @@ def _check_and_process_single_order(broker_order) -> None:
     if not status_result:
         return
 
-    broker_status = status_result.get("status", "").upper()
-    filled_qty    = Decimal(str(status_result.get("filled_qty", 0) or 0))
-    fill_price    = Decimal(str(status_result.get("avg_price",  0) or 0))
+    # ── All adapters (Dhan, Fyers, Zerodha, Delta) dict return karte hain ────
+    # DhanAdapter.get_order_status() → {success, status, filled_qty, avg_price, ...}
+    if True:
+        # ── Dict format (all adapters) ───────────────────────────────────────
+        broker_status = status_result.get("status", "").upper()
+        filled_qty    = Decimal(str(status_result.get("filled_qty", 0) or 0))
+        fill_price    = Decimal(str(status_result.get("avg_price",  0) or 0))
 
-    # Fyers status codes:
-    # 1=Cancelled, 2=Traded(filled), 3=For future use, 4=Transit, 5=Rejected, 6=Pending
-    is_filled = (
-        broker_status in ("TRADED", "FILLED", "COMPLETE", "EXECUTED", "2")
-        or status_result.get("status_code") == 2
-    )
-    is_rejected = (
-        broker_status in ("REJECTED", "CANCELLED", "1", "5")
-        or status_result.get("status_code") in (1, 5)
-    )
+        # Fyers status codes:
+        # 1=Cancelled, 2=Traded(filled), 3=For future use, 4=Transit, 5=Rejected, 6=Pending
+        is_filled = (
+            broker_status in ("TRADED", "FILLED", "COMPLETE", "EXECUTED", "2")
+            or status_result.get("status_code") == 2
+        )
+        is_rejected = (
+            broker_status in ("REJECTED", "CANCELLED", "1", "5")
+            or status_result.get("status_code") in (1, 5)
+        )
 
     if is_filled and fill_price > 0 and filled_qty > 0:
         process_broker_fill(

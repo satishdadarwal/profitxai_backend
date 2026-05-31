@@ -402,12 +402,104 @@ class FyersExecutionAdapter(ExecutionAdapter):
         return []
 
 
+# ─── 4b. Delta Execution Adapter ─────────────────────────────────────────────
+class DeltaExecutionAdapter(ExecutionAdapter):
+    """
+    Live mode — Delta Exchange India pe actual order place karta hai.
+    BTC-USDT / ETH-USDT → _call_delta_api ke through order jaata hai.
+    ✅ FIX: Crypto symbols ke liye FyersExecutionAdapter ki jagah yeh use karo.
+
+    ✅ SECURITY FIX: Sirf tabhi order jaega jab user ka apna Delta broker account
+    ho. Dusre user ka account ya Fyers-only user ka Delta pe order NAHI jaega.
+    """
+
+    def __init__(self, user, broker_account=None):
+        self.user = user
+        # Pre-validated broker account pass karo — agar None hai toh place_order fail karega
+        self._broker_account = broker_account
+
+    async def place_order(self, order) -> str:
+        from asgiref.sync import sync_to_async
+        return await sync_to_async(self._place_order_sync)(order)
+
+    def _place_order_sync(self, order) -> str:
+        try:
+            from apps.strategies.signal_router import (
+                _call_delta_api,
+                _to_delta_symbol,
+            )
+
+            # ✅ SECURITY FIX: Pre-validated account use karo — fresh DB query nahi
+            # execute_cycle_ict() mein already validate ho chuka hai ki:
+            #   1. User ka Delta broker account hai
+            #   2. is_active=True, is_verified=True
+            #   3. account.user == strategy.user (ownership verified)
+            account = self._broker_account
+            if not account:
+                raise RuntimeError(
+                    f"No active Delta account for user {self.user.pk}. "
+                    f"Fix: Admin panel mein is user ke liye Delta broker account add karo."
+                )
+
+            # Direction: long → buy, short → sell
+            side = "buy" if order.direction.value in ("long", "buy") else "sell"
+
+            # instrument_type — strategy se milega agar available ho
+            product_type = "perp"  # default perpetual
+
+            resp = _call_delta_api(
+                account=account,
+                symbol=order.symbol,
+                side=side,
+                qty=int(order.size) or 1,
+                product_type=product_type,
+                current_price=float(order.price),
+            )
+
+            # Delta API response: {"success": true, "result": {"id": 12345}}
+            if resp.get("success"):
+                broker_id = str(resp.get("result", {}).get("id", "unknown"))
+            else:
+                err_msg = resp.get("error", {}).get("message", str(resp))
+                logger.error(
+                    "Delta order FAILED | symbol=%s | side=%s | err=%s",
+                    order.symbol, side, err_msg,
+                )
+                raise RuntimeError(f"Delta order rejected: {err_msg}")
+
+            logger.info(
+                "Delta live order placed | broker_id=%s | symbol=%s | side=%s | qty=%s",
+                broker_id, order.symbol, side, int(order.size),
+            )
+            return broker_id
+
+        except Exception as e:
+            logger.error("DeltaExecutionAdapter.place_order error: %s", e)
+            raise
+
+    async def cancel_order(self, broker_order_id: str) -> bool:
+        return True
+
+    async def get_account_balance(self) -> float:
+        return 0.0
+
+    async def get_positions(self):
+        return []
+
+
 # ─── 5. execute_cycle_ict ─────────────────────────────────────────────────────
 def execute_cycle_ict(strategy, symbol: str) -> dict:
     """
     ICT MTF analysis + signal dispatch — ek cycle.
     strategies/services.py ke execute_cycle() mein call karo.
+
+    ✅ SECURITY FIX: Executor banane se PEHLE broker account validate karo.
+    Agar user ka woh broker nahi hai jiska symbol hai, toh cycle bilkul nahi chalegi.
+    - Fyers-only user → crypto cycle skip
+    - Delta-only user → NSE cycle skip
+    - Koi bhi user dusre ka account use nahi kar sakta
     """
+    from apps.brokers.models import BrokerAccount
     from apps.ict_engine.dispatcher import Dispatcher
 
     config = RunnerConfig(
@@ -421,8 +513,8 @@ def execute_cycle_ict(strategy, symbol: str) -> dict:
     )
 
     # Auto-detect provider
-    if _is_crypto(symbol):
-        from apps.common.candle_service import _fetch_from_delta
+    crypto = _is_crypto(symbol)
+    if crypto:
         provider = DeltaDataProvider()
     else:
         provider = FyersDataProvider(user=strategy.user)
@@ -430,8 +522,67 @@ def execute_cycle_ict(strategy, symbol: str) -> dict:
     db_adapter = DjangoDatabaseAdapter(strategy=strategy)
     ws_adapter = DjangoWebSocketAdapter(strategy=strategy)
 
+    # ✅ SECURITY FIX: Executor banane se PEHLE broker account validate karo.
+    # Live mode mein sirf tabhi order jayega jab user ka apna correct broker account ho.
     if strategy.mode == "live":
-        executor = FyersExecutionAdapter(user=strategy.user)
+        if crypto:
+            # ── Delta account check ──────────────────────────────────────────
+            delta_account = BrokerAccount.objects.filter(
+                user=strategy.user,
+                broker="delta",
+                is_active=True,
+                is_verified=True,
+            ).first()
+
+            if not delta_account:
+                logger.warning(
+                    "⛔ execute_cycle_ict: user=%s ke paas active Delta account nahi hai "
+                    "— crypto cycle '%s' skip. "
+                    "Fix: Admin panel mein Delta account add karo.",
+                    strategy.user.pk, symbol,
+                )
+                return _null_signal(symbol)
+
+            # Ownership double-check (defensive)
+            if delta_account.user_id != strategy.user.pk:
+                logger.critical(
+                    "🚨 SECURITY: Delta account %s belongs to user %s "
+                    "but strategy %s belongs to user %s — BLOCKING.",
+                    delta_account.id, delta_account.user_id,
+                    strategy.id, strategy.user.pk,
+                )
+                return _null_signal(symbol)
+
+            executor = DeltaExecutionAdapter(user=strategy.user, broker_account=delta_account)
+
+        else:
+            # ── Fyers account check ──────────────────────────────────────────
+            fyers_account = BrokerAccount.objects.filter(
+                user=strategy.user,
+                broker="fyers",
+                is_active=True,
+                is_verified=True,
+            ).first()
+
+            if not fyers_account:
+                logger.warning(
+                    "⛔ execute_cycle_ict: user=%s ke paas active Fyers account nahi hai "
+                    "— NSE cycle '%s' skip. "
+                    "Fix: Admin panel mein Fyers account add karo.",
+                    strategy.user.pk, symbol,
+                )
+                return _null_signal(symbol)
+
+            if fyers_account.user_id != strategy.user.pk:
+                logger.critical(
+                    "🚨 SECURITY: Fyers account %s belongs to user %s "
+                    "but strategy %s belongs to user %s — BLOCKING.",
+                    fyers_account.id, fyers_account.user_id,
+                    strategy.id, strategy.user.pk,
+                )
+                return _null_signal(symbol)
+
+            executor = FyersExecutionAdapter(user=strategy.user)
     else:
         executor = PaperExecutionAdapter()
 
@@ -461,6 +612,69 @@ def execute_cycle_ict(strategy, symbol: str) -> dict:
         return _null_signal(symbol)
 
     sig = signals[0]
+
+    # ✅ FIX: Paper mode → directly PaperTrade DB record banao
+    # PaperExecutionAdapter sirf in-memory dry_run karta hai — actual DB record
+    # nahi banta, isliye Auto Paper dashboard pe 0 trades dikhta hai.
+    # open_trade() directly call karo — yeh proper PaperTrade record banata hai
+    # jisko Flutter app ka Auto Paper page fetch kar sake.
+    paper_order = None
+    if strategy.mode == "paper" and sig.direction is not None:
+        try:
+            from apps.paper_trading.services import open_trade
+            from decimal import Decimal as _D
+
+            entry  = float(sig.entry_price)
+            sl     = sig.stop_loss    or round(entry * 0.99, 2)
+            tp     = sig.take_profit_1 or round(entry * 1.02, 2)
+            size   = sig.position_size or 1
+
+            # instrument_type detect karo
+            instr = getattr(strategy, "instrument_type", "crypto")
+
+            # Crypto symbols ke liye asset_type = crypto
+            symbol_up = sig.symbol.upper()
+            if any(k in symbol_up for k in ("BTC", "ETH", "SOL", "USDT", "BNB", "XRP")):
+                asset_type = "crypto"
+            elif instr in ("futures", "perp"):
+                asset_type = "futures"
+            elif instr == "options":
+                asset_type = "option"
+            else:
+                asset_type = instr or "crypto"
+
+            direction = sig.direction.value  # "long"/"short" → "buy"/"sell"
+            side = "buy" if direction in ("long", "buy") else "sell"
+
+            trade_data = {
+                "symbol":          sig.symbol,
+                "asset_type":      asset_type,
+                "instrument_type": instr,
+                "display_name":    sig.symbol,
+                "side":            side,
+                "quantity":        size,
+                "lot_size":        1,
+                "leverage":        1,
+                "entry_price":     entry,
+                "stop_loss":       sl,
+                "target_price":    tp,
+                "setup_type":      f"Auto-{getattr(strategy, 'algo_name', 'ict')}",
+                "strategy_id":     str(strategy.id),
+            }
+
+            paper_order = open_trade(strategy.user, trade_data)
+            logger.info(
+                "✅ Paper trade created | id=%s | symbol=%s | side=%s | entry=%.4f | "
+                "sl=%.4f | tp=%.4f | strategy=%s",
+                paper_order.id if paper_order else "?",
+                sig.symbol, side, entry, sl, tp, strategy.id,
+            )
+        except Exception as _pe:
+            logger.error(
+                "❌ Paper trade creation failed | strategy=%s | symbol=%s | err=%s",
+                strategy.id, sig.symbol, _pe, exc_info=True,
+            )
+
     return {
         "signal_type": sig.direction.value if sig.direction else "hold",
         "symbol": sig.symbol,
@@ -473,8 +687,8 @@ def execute_cycle_ict(strategy, symbol: str) -> dict:
             "take_profit": sig.take_profit_1,
             "tags": sig.tags,
         },
-        "result": "executed",
-        "order": None,
+        "result": "executed" if paper_order else "skipped",
+        "order": paper_order,
     }
 
 

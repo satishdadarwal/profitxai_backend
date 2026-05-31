@@ -1,9 +1,10 @@
 # apps/strategies/models.py
 #
-# CHANGES from previous version:
-#   1. instrument_type field added (options/futures/equity/perp)
-#   2. risk_config JSONField added (sl_pct, target_pct, qty, rr_ratio)
-#   3. symbol duplicate field removed (was defined twice)
+# CHANGES (Global Strategy feature):
+#   1. `is_global` BooleanField added — admin backend se set karo, sab users ko dikhe
+#   2. `allowed_plans` ArrayField added — specify karo ki kis plan wale user ko dikhe
+#      e.g. ['basic', 'pro', 'elite'] means free users ko nahi dikhega
+#   3. `created_by_admin` BooleanField added — admin-created strategies identify karo
 
 import uuid
 
@@ -35,7 +36,13 @@ class Strategy(models.Model):
         PERP = "perp", "Perpetual"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="strategies")
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name="strategies",
+        null=True,         # ✅ Global strategies me user null hoga
+        blank=True,
+    )
 
     broker = models.ForeignKey(
         'brokers.BrokerAccount',
@@ -74,6 +81,27 @@ class Strategy(models.Model):
     parameters = models.JSONField(default=dict, blank=True)
     is_active = models.BooleanField(default=True)
 
+    # ─── ✅ NEW: Global Strategy Fields ─────────────────────────────
+    is_global = models.BooleanField(
+        default=False,
+        help_text="True = Admin ne banaya hai, sab eligible users ko dikhe. "
+                  "False = Sirf us user ko dikhe jiska strategy hai.",
+    )
+
+    allowed_plans = ArrayField(
+        models.CharField(max_length=20),
+        default=list,
+        blank=True,
+        help_text="Kon se plans ke users ko yeh global strategy dikhe. "
+                  "Empty = sab plans ke users. e.g. ['basic', 'pro', 'elite']",
+    )
+
+    created_by_admin = models.BooleanField(
+        default=False,
+        help_text="Admin panel se create ki gayi strategy hai ya user ne.",
+    )
+    # ─────────────────────────────────────────────────────────────────
+
     TIMEFRAME_CHOICES = [
         ("1",    "1 Minute"),
         ("5",    "5 Minutes"),
@@ -107,7 +135,8 @@ class Strategy(models.Model):
 
     def __str__(self):
         broker_name = self.broker.broker if self.broker else "no broker"
-        return f"{self.name} ({self.mode}/{self.instrument_type}) [{broker_name}] — {self.state}"
+        tag = " [GLOBAL]" if self.is_global else ""
+        return f"{self.name} ({self.mode}/{self.instrument_type}) [{broker_name}] — {self.state}{tag}"
 
     @property
     def is_running(self):
@@ -129,6 +158,68 @@ class Strategy(models.Model):
     def get_risk_param(self, key, default=None):
         """risk_config se param safely fetch karo."""
         return self.risk_config.get(key, default)
+
+    def is_visible_to_user(self, user) -> bool:
+        """
+        Check karo ki yeh strategy `user` ko dikhni chahiye ya nahi.
+
+        Rules:
+        1. User ki apni strategy → hamesha dikhegi
+        2. Global strategy → plan check karo
+           - allowed_plans empty → sab plans ko dikhe
+           - allowed_plans specified → sirf un plans ke users ko dikhe
+        3. Global nahi, dusre user ki → kabhi nahi dikhegi
+
+        FIX: user.plan field sync nahi hota Subscription se,
+             isliye Subscription model directly check karo.
+        """
+        # Apni strategy
+        if self.user_id == user.pk:
+            return True
+
+        # Global strategy — plan check karo
+        if self.is_global:
+            if not self.allowed_plans:
+                return True  # Sab plans ko dikhe
+
+            # Subscription se active plan fetch karo (reliable)
+            user_plan_name = self._get_user_plan_name(user)
+            if user_plan_name is None:
+                return False
+
+            # Case-insensitive comparison
+            allowed_lower = [p.lower() for p in self.allowed_plans]
+            return user_plan_name.lower() in allowed_lower
+
+        return False
+
+    @staticmethod
+    def _get_user_plan_name(user) -> str | None:
+        """
+        User ka active plan name return karo.
+
+        NOTE: Kai users ka Subscription record nahi hota (admin ne manually
+        user.plan set kiya hoga). Dono cases handle karo.
+        user.subscription directly access karne se RelatedObjectDoesNotExist
+        crash hota hai — isliye filter() use karo.
+        """
+        # Priority 1: user.plan field (most reliable — admin directly set karta hai)
+        plan_val = getattr(user, 'plan', 'free') or 'free'
+        if plan_val != 'free':
+            return plan_val.capitalize()  # "elite" → "Elite"
+
+        # Priority 2: Subscription table
+        try:
+            from apps.subscriptions.models import Subscription, Plan
+            sub = Subscription.objects.filter(
+                user=user
+            ).select_related('plan').first()
+            if sub and sub.is_access_granted and sub.plan.tier > Plan.Tier.FREE:
+                return sub.plan.name
+        except Exception:
+            pass
+
+        return None
 
 
 class StrategySignal(models.Model):
@@ -194,19 +285,95 @@ def broadcast_strategy_update(sender, instance, **kwargs):
 
         channel_layer = get_channel_layer()
 
-        # ✅ FIX: None guard — channel layer configured nahi to silently skip
         if channel_layer is None:
             _log.debug("Channel layer not configured — skipping WS broadcast")
             return
 
-        group_name = f"user_{instance.user_id}"
-
-        async_to_sync(channel_layer.group_send)(  # now safe — not None
-            group_name,
-            {
-                "type": "strategy_update",
-                "payload": StrategySerializer(instance).data,
-            },
-        )
+        # ✅ Global strategy → sab connected users ko broadcast karo
+        if instance.is_global:
+            # Yeh approach sirf tab kaam karta hai jab aap sab users track kar rahe ho
+            # Simplest approach: group "global_strategies" use karo
+            async_to_sync(channel_layer.group_send)(
+                "global_strategies",
+                {
+                    "type": "strategy_update",
+                    "payload": StrategySerializer(instance).data,
+                },
+            )
+        elif instance.user_id:
+            group_name = f"user_{instance.user_id}"
+            async_to_sync(channel_layer.group_send)(
+                group_name,
+                {
+                    "type": "strategy_update",
+                    "payload": StrategySerializer(instance).data,
+                },
+            )
     except Exception as e:
         _log.warning("WS broadcast failed: %s", e)
+
+# ─────────────────────────────────────────────────────────────────
+#  UserStrategyPreference — User ka per-strategy mode preference
+#
+#  Admin ek strategy banata hai (is_global=True) — usme mode field
+#  sirf "master default" hai. Har user apna preferred_mode choose
+#  kar sakta hai: paper ya live.
+#
+#  Agar koi preference nahi hai → strategy.mode (master default) use hoga.
+# ─────────────────────────────────────────────────────────────────
+class UserStrategyPreference(models.Model):
+    """
+    User ka per-strategy mode preference.
+
+    Ek user ek strategy ke liye ek hi preference rakh sakta hai
+    (unique_together = user + strategy).
+
+    preferred_mode:
+      - 'paper' → user paper trading karna chahta hai
+      - 'live'  → user live trading karna chahta hai
+      - None    → strategy ka master default use karo
+    """
+
+    class PreferredMode(models.TextChoices):
+        PAPER = "paper", "Paper Trading"
+        LIVE  = "live",  "Live Trading"
+
+    id       = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user     = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name="strategy_preferences",
+    )
+    strategy = models.ForeignKey(
+        Strategy,
+        on_delete=models.CASCADE,
+        related_name="user_preferences",
+    )
+    preferred_mode = models.CharField(
+        max_length=10,
+        choices=PreferredMode.choices,
+        default=PreferredMode.PAPER,
+        help_text="User ka chosen mode: paper ya live",
+    )
+    is_running = models.BooleanField(
+        default=False,
+        help_text="Is user ke liye yeh strategy chal rahi hai?",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ("user", "strategy")
+        verbose_name = "User Strategy Preference"
+        verbose_name_plural = "User Strategy Preferences"
+
+    def __str__(self):
+        return (
+            f"{self.user.email} — {self.strategy.name} "
+            f"[{self.preferred_mode}] "
+            f"{'▶ Running' if self.is_running else '⏹ Stopped'}"
+        )
+
+    def effective_mode(self) -> str:
+        """User ka mode — agar set nahi toh strategy ka master default."""
+        return self.preferred_mode or self.strategy.mode

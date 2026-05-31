@@ -706,3 +706,22 @@ class TradeConsumer(BaseConsumer):
             payload.get("id", "?"),
             payload.get("state", "?"),
         )
+
+    async def trade_placed(self, event):
+        """
+        Handler for trade.placed channel layer messages.
+        signal_router.py → _ws_notify_success / _ws_notify_failure
+        dono is type ka use karte hain.
+        Flutter ko order success/failure notification bhejo.
+        """
+        await self.send_json({
+            "type": "trade.placed",
+            "message": event.get("message", ""),
+            "trade_id": event.get("trade_id"),
+            "is_error": event.get("is_error", False),
+        })
+        logger.info(
+            "trade.placed → Flutter | user=%s | is_error=%s",
+            self.user.id,
+            event.get("is_error", False),
+        )

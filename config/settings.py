@@ -27,6 +27,7 @@ FYERS_APP_ID = os.getenv("FYERS_APP_ID", "")
 FYERS_SECRET_KEY = os.getenv("FYERS_SECRET_KEY", "")
 FYERS_REDIRECT_URI = os.getenv("FYERS_REDIRECT_URI", "")
 FLUTTER_DEEP_LINK = os.getenv("FLUTTER_DEEP_LINK", "http://localhost:3000/#/fyers-callback")
+FLUTTER_WEB_BASE_URL = os.getenv("FLUTTER_WEB_BASE_URL", "http://localhost:50067")
 FYERS_MASTER_TOTP_SECRET = os.getenv("FYERS_MASTER_TOTP_SECRET", "")
 FYERS_MASTER_REFRESH_TOKEN = os.getenv("FYERS_MASTER_REFRESH_TOKEN", "")
 DELTA_BASE_URL = os.getenv("DELTA_BASE_URL", "https://api.india.delta.exchange")
@@ -90,6 +91,7 @@ MIDDLEWARE = [
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "apps.subscriptions.middleware.SubscriptionMiddleware",
+    "config.middleware.NgrokSkipWarningMiddleware",  # ✅ ngrok browser warning bypass
 ]
 
 ROOT_URLCONF = "config.urls"
@@ -185,7 +187,12 @@ CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
 CELERY_TIMEZONE = "Asia/Kolkata"
-CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
+CELERY_BEAT_SCHEDULER = "celery.beat:PersistentScheduler"
+# ⚠️  NOTE: DatabaseScheduler (django_celery_beat) HATA DIYA.
+# DatabaseScheduler admin panel se runtime schedule change allow karta hai,
+# lekin iska side effect hai ki purani/stale DB entries worker restart pe
+# sab ek saath fire ho jaati hain — isliye 18x flood ho raha tha.
+# PersistentScheduler file-based hai, code se sync rehta hai, no flood.
 CELERY_TASK_TRACK_STARTED = True
 CELERY_TASK_TIME_LIMIT = 300  # 5 minutes hard limit
 CELERY_TASK_SOFT_TIME_LIMIT = 240  # 4 minutes soft limit
@@ -206,12 +213,18 @@ CELERY_BEAT_SCHEDULE = {
     "market-scanner": {
         "task": "apps.strategies.tasks.run_strategy_scanner",
         "schedule": 60,
+        "options": {"expires": 55},
     },
-    # ── Feed restart har 5 min ──────────────────────────────
-    "start-active-feeds": {
-        "task": "apps.brokers.tasks.start_all_active_feeds",
-        "schedule": 300,
-    },
+    # ── REMOVED: start-active-feeds (har 5 min) ─────────────
+    # ⚠️  BUG: Har 5 min pe feed restart → duplicate connections.
+    # Feed lifecycle: worker_ready (ek baar) + crontab 8:45 AM (daily).
+    # Yahan se NAHI chalna chahiye.
+
+    # ── REMOVED: run-all-active-strategies (har 60s) ────────
+    # ⚠️  BUG: settings.py + celery_production.py dono mein tha →
+    # DatabaseScheduler dono merge karta tha → duplicate dispatches.
+    # Ab sirf celery_production.py ke beat_schedule mein manage hoga.
+
     # ── Subscription expiry ─────────────────────────────────
     "check-subscriptions": {
         "task": "apps.subscriptions.tasks.check_expired_subscriptions",
@@ -235,16 +248,17 @@ CELERY_BEAT_SCHEDULE = {
     "options-sltp-check": {
         "task": "apps.options.tasks.update_spot_and_check_sltp",
         "schedule": 10,
+        "options": {"expires": 9},
     },
     "ict-screener": {
         "task": "apps.strategies.tasks.run_ict_screener",
         "schedule": 900,
     },
-    # ── NEW: Run all active strategies ──────────────────────
-    "run-all-active-strategies": {
-        "task": "apps.strategies.tasks.run_all_active_strategies",
-        "schedule": 60.0,  # हर 60 सेकंड
-        "options": {"queue": "strategies"},
+    # ── Strategy performance snapshots ──────────────────────
+    "strategy-snapshots": {
+        "task": "strategies.take_performance_snapshots",
+        "schedule": 3600,
+        "options": {"queue": "default"},
     },
 }
 
@@ -256,12 +270,23 @@ CHANNEL_LAYERS = {
         "BACKEND": "channels_redis.core.RedisChannelLayer",
         "CONFIG": {
             "hosts": [("127.0.0.1", 6379)],
-            # ✅ Increased capacity for more concurrent connections
-            "capacity": 2000,  # was 1500
-            "expiry": 60,      # was 10 - increased to prevent premature expiry
-            # ✅ Additional optimizations
+            # Global capacity — total messages in Redis per channel
+            "capacity": 2000,
+            "expiry": 60,
             "group_expiry": 86400,  # 24 hours
             "symmetric_encryption_keys": [SECRET_KEY],
+            # ✅ FIX: Per-group channel capacity
+            # Default is 100 — "market" group gets flooded by high-frequency ticks
+            # "8 of 11 channels over capacity in group market" — yeh warning isi se aati thi
+            "channel_capacity": {
+                # market group — all connected WS clients subscribe this
+                # high tick rate (5 symbols × ~3 ticks/sec = 15 msg/sec × 11 clients)
+                "market": 500,
+                # per-symbol groups — targeted broadcasts
+                "symbol_*": 200,
+                # user-specific groups — signals, orders, PnL
+                "user_*": 100,
+            },
         },
     },
 }
@@ -283,8 +308,9 @@ REST_FRAMEWORK = {
     ],
     "DEFAULT_THROTTLE_RATES": {
         "anon": "30/minute",
-        "user": "200/minute",
+        "user": "300/minute",      # ✅ FIX: 200 → 300 (algo trading ke liye headroom)
         'login': '10/minute',
+        "capital_warning": "20/minute",  # ✅ FIX: capital-warning ka dedicated throttle
     },
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
     "PAGE_SIZE": 20,
@@ -334,6 +360,20 @@ CORS_ALLOW_CREDENTIALS = True
 
 CORS_ALLOW_ALL_ORIGINS = True
 
+# ✅ FIX: CSRF_TRUSTED_ORIGINS — ngrok aur sab allowed origins add karo
+# Bina iske Django CSRF middleware ngrok se aane wali requests block karta hai
+# Fyers callback GET / pe redirect ho jaata tha — yahi root cause tha
+_raw_cors = os.getenv(
+    "CORS_ALLOWED_ORIGINS",
+    "http://localhost:3000,http://localhost:8080",
+).split(",")
+CSRF_TRUSTED_ORIGINS = [o.strip() for o in _raw_cors if o.strip()] + [
+    "https://*.ngrok-free.dev",
+    "https://*.ngrok.io",
+    "http://localhost:8000",
+    "http://127.0.0.1:8000",
+]
+
 CORS_ALLOW_HEADERS = [
     "accept",
     "accept-encoding",
@@ -344,6 +384,9 @@ CORS_ALLOW_HEADERS = [
     "user-agent",
     "x-csrftoken",
     "x-requested-with",
+    # ✅ FIXED: ngrok-skip-browser-warning header allow karo
+    # Flutter web app yeh header bhejta hai — bina iske CORS preflight fail hota hai
+    "ngrok-skip-browser-warning",
 ]
 
 # ─── Email ────────────────────────────────────────────────────
@@ -474,7 +517,7 @@ LOGGING = {
         "file": {
             # ✅ Sirf yeh line badli
             "class": "concurrent_log_handler.ConcurrentRotatingFileHandler",
-            "filename": BASE_DIR / "logs" / "app.log",
+            "filename": str(BASE_DIR / "logs" / "app.log"),
             "maxBytes": 10 * 1024 * 1024,
             "backupCount": 7,
             "encoding": "utf-8",

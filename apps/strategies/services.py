@@ -350,13 +350,16 @@ def run_backtest(
     fyers = fyersModel.FyersModel(
         client_id=account.app_id, token=account.access_token, log_path="", is_async=False,
     )
-    data = fyers.history(
+    # ✅ FIX: cast to dict — Pylance fyers.history() ko CoroutineType samajhta hai
+    # is_async=False hone par yeh sync dict return karta hai
+    from typing import cast as _cast
+    data: dict = _cast(dict, fyers.history(
         data={
             "symbol": fyers_sym, "resolution": resolution,
             "date_format": "1", "range_from": from_date,
             "range_to": to_date, "cont_flag": "1",
         }
-    )
+    ))
     if data.get("s") != "ok":
         raise Exception(f"Candle fetch failed: {data}")
 
@@ -578,7 +581,10 @@ async def execute_cycle_async(strategy, symbol: Optional[str] = None) -> "AlgoSi
 
         last_candle = _ref[-1]
         price = Decimal(str(
-            last_candle.close if hasattr(last_candle, "close") else last_candle["close"]
+            getattr(last_candle, "close", None)
+            if hasattr(last_candle, "close")
+            else last_candle.get("close", 0) if isinstance(last_candle, dict)
+            else 0
         ))
 
         from apps.backtest.engine import get_algo
@@ -609,6 +615,7 @@ async def execute_cycle_async(strategy, symbol: Optional[str] = None) -> "AlgoSi
                 strategy=strategy,
                 asset__symbol=target_symbol,
                 status__in=(Order.Status.OPEN, Order.Status.PARTIAL),
+                mode=strategy.mode,  # ✅ paper/live conflict fix
             ).first()
         )()
 
@@ -690,7 +697,10 @@ def _execute_cycle_inner(strategy, target_symbol: str) -> "AlgoSignal":
 
     last_candle = _ref[-1]
     price = Decimal(str(
-        last_candle.close if hasattr(last_candle, "close") else last_candle["close"]
+        getattr(last_candle, "close", None)
+        if hasattr(last_candle, "close")
+        else last_candle.get("close", 0) if isinstance(last_candle, dict)
+        else 0
     ))
 
     try:
@@ -717,9 +727,14 @@ def _execute_cycle_inner(strategy, target_symbol: str) -> "AlgoSignal":
         _save_signal(strategy, signal)
         return signal
 
+    # ✅ FIX: mode bhi filter mein add karo.
+    # Warna paper strategy ka open order, live strategy ko block kar deta hai
+    # aur vice versa. Dono independently run ho sakti hain bina conflict ke.
     open_order = Order.objects.filter(
-        strategy=strategy, asset__symbol=target_symbol,
+        strategy=strategy,
+        asset__symbol=target_symbol,
         status__in=(Order.Status.OPEN, Order.Status.PARTIAL),
+        mode=strategy.mode,  # ✅ sirf same mode ke orders check karo
     ).first()
 
     if open_order:
@@ -763,6 +778,7 @@ def _handle_ict_signal(
     open_order = Order.objects.filter(
         strategy=strategy, asset__symbol=target_symbol,
         status__in=(Order.Status.OPEN, Order.Status.PARTIAL),
+        mode=strategy.mode,  # ✅ paper/live conflict fix
     ).first()
 
     if open_order:
@@ -772,6 +788,7 @@ def _handle_ict_signal(
         return signal
 
     meta = signal.metadata or {}
+    # ✅ FIX: sl_price bhi meta se lo (pehle missing tha → NameError)
     sl_price = meta.get("stop_loss")
     tp_price = (
         meta.get("take_profit_2") or meta.get("take_profit_1")
@@ -815,6 +832,7 @@ async def _handle_ict_signal_async(
         lambda: Order.objects.filter(
             strategy=strategy, asset__symbol=target_symbol,
             status__in=(Order.Status.OPEN, Order.Status.PARTIAL),
+            mode=strategy.mode,  # ✅ paper/live conflict fix
         ).first()
     )()
 
@@ -897,7 +915,27 @@ def _validate_algo(algo_name: str):
 
 
 def _is_market_time() -> bool:
-    return True
+    """
+    NSE market hours: Mon-Fri, 9:15 AM - 3:30 PM IST.
+    Crypto (Delta): always open.
+    Set SKIP_MARKET_HOURS_CHECK=True in settings to bypass (dev/testing).
+    """
+    from django.conf import settings as _settings
+    if getattr(_settings, "SKIP_MARKET_HOURS_CHECK", False):
+        return True
+    try:
+        import pytz
+        from datetime import time as dt_time
+        from django.utils import timezone as _tz
+        IST = pytz.timezone("Asia/Kolkata")
+        now_ist = _tz.now().astimezone(IST)
+        if now_ist.weekday() >= 5:   # Sat/Sun
+            return False
+        return dt_time(9, 15) <= now_ist.time() <= dt_time(15, 30)
+    except Exception as e:
+        logger.warning("_is_market_time check failed: %s — defaulting to False", e)
+        return False
+
 
 
 def _save_signal(strategy: Strategy, signal: "AlgoSignal"):

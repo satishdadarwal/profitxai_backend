@@ -30,16 +30,27 @@ services:
       - static_volume:/app/staticfiles
       - media_volume:/app/media
     ports:
-      - "0.0.0.0:8000:8000"  # ← यहां 0.0.0.0 add किया
+      - "0.0.0.0:8000:8000"
     env_file: .env
     depends_on:
       - db
       - redis
-    dns:  # ← DNS servers add किए
+    dns:
       - 8.8.8.8
       - 8.8.4.4
-    extra_hosts:  # ← Host access के लिए
+    extra_hosts:
       - "host.docker.internal:host-gateway"
+
+  # ✅ NAYA: Cloudflare Tunnel
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on:
+      - web
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
 
   celery-orders:
     build: .
@@ -51,7 +62,7 @@ services:
     depends_on:
       - db
       - redis
-    dns:  # ← DNS add किया
+    dns:
       - 8.8.8.8
       - 8.8.4.4
 
@@ -65,7 +76,7 @@ services:
     depends_on:
       - db
       - redis
-    dns:  # ← DNS add किया
+    dns:
       - 8.8.8.8
       - 8.8.4.4
 
@@ -79,7 +90,7 @@ services:
     depends_on:
       - db
       - redis
-    dns:  # ← DNS add किया
+    dns:
       - 8.8.8.8
       - 8.8.4.4
 

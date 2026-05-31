@@ -152,13 +152,46 @@ class DeltaAdapter(BaseBrokerAdapter):
     def get_funds(self) -> FundsInfo:
         resp = self._get("/v2/wallet/balances")
         wallets = resp.get("result", [])
-        usdt = next((w for w in wallets if w.get("asset_symbol") == "USDT"), {})
+
+        # ✅ FIX: Delta India API INR use karta hai (USDT nahi)
+        # Delta Global (non-India) USDT use karta hai.
+        # Priority: INR → USDT → USD → pehla wallet jo balance > 0 ho
+        _PREFERRED = ("INR", "USDT", "USD")
+
+        wallet = {}
+        # 1. Preferred currency order mein dhundho
+        for sym in _PREFERRED:
+            found = next((w for w in wallets if w.get("asset_symbol") == sym), None)
+            if found and (self._d(found.get("balance")) > 0 or self._d(found.get("available_balance")) > 0):
+                wallet = found
+                currency = sym
+                break
+
+        # 2. Fallback: pehla wallet jo balance > 0 ho
+        if not wallet:
+            for w in wallets:
+                if self._d(w.get("balance")) > 0 or self._d(w.get("available_balance")) > 0:
+                    wallet = w
+                    currency = w.get("asset_symbol", "USDT")
+                    break
+            else:
+                # Koi balance nahi — pehla wallet return karo
+                wallet = wallets[0] if wallets else {}
+                currency = wallet.get("asset_symbol", "INR")
+
+        logger.info(
+            "Delta funds | currency=%s | available=%s | balance=%s",
+            currency,
+            wallet.get("available_balance"),
+            wallet.get("balance"),
+        )
+
         return FundsInfo(
-            available=self._d(usdt.get("available_balance")),
-            used=self._d(usdt.get("blocked_margin")),
-            total=self._d(usdt.get("balance")),
-            currency="USDT",
-            raw=usdt,
+            available=self._d(wallet.get("available_balance")),
+            used=self._d(wallet.get("blocked_margin")),
+            total=self._d(wallet.get("balance")),
+            currency=currency,
+            raw=wallet,
         )
 
     def get_positions(self) -> List[PositionInfo]:

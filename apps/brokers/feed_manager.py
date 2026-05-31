@@ -180,21 +180,47 @@ def _update_position_pnl(symbol: str, ltp: float):
 # ─────────────────────────────────────────────────────────────────
 
 def start_feed_for_account(broker_account_id: int):
-    if broker_account_id in _feeds:
-        return
+    """
+    ✅ FIX: Windows Celery solo pool mein _feeds dict per-task naya hota hai —
+    in-memory guard kaam nahi karta.  Redis cache se distributed lock lagao.
+    """
     try:
+        from django.core.cache import cache
+
+        # Redis-based idempotency key — TTL 60s (feed 60s mein khud reconnect karta hai)
+        lock_key = f"feed_started:{broker_account_id}"
+        if cache.get(lock_key):
+            return  # Already started by another task/thread
+
         from apps.brokers.models import BrokerAccount
-        from apps.websocket.fyers_feed import feed_manager as fyers_feed_manager
+        account = BrokerAccount.objects.get(id=broker_account_id, is_active=True)
 
-        BrokerAccount.objects.get(id=broker_account_id, broker="fyers", is_active=True)
-
-        for sym in [
+        INDEX_SYMBOLS = [
             "NSE:NIFTY50-INDEX", "NSE:NIFTYBANK-INDEX",
             "NSE:FINNIFTY-INDEX", "NSE:MIDCPNIFTY-INDEX", "BSE:SENSEX-INDEX",
-        ]:
-            fyers_feed_manager.subscribe(sym)
+        ]
 
-        _feeds[broker_account_id] = fyers_feed_manager
+        if account.broker == "fyers":
+            from apps.websocket.fyers_feed import feed_manager as fyers_feed_manager
+            for sym in INDEX_SYMBOLS:
+                fyers_feed_manager.subscribe(sym)
+            _feeds[broker_account_id] = fyers_feed_manager
+
+        elif account.broker == "dhan":
+            from apps.websocket.dhan_feed import dhan_feed_manager
+            for sym in INDEX_SYMBOLS:
+                dhan_feed_manager.subscribe(sym)
+            _feeds[broker_account_id] = dhan_feed_manager
+
+        else:
+            # Delta ya baaki brokers — registry se adapter lo, feed skip karo
+            logger.info(
+                "start_feed_for_account: broker=%s does not have a dedicated feed",
+                account.broker,
+            )
+            return
+        # Lock set karo — 60s ke baad auto-expire (feed reconnect window)
+        cache.set(lock_key, True, timeout=60)
         logger.info("Feed started | account=%s", broker_account_id)
     except Exception as e:
         logger.error("start_feed_for_account error: %s", e)

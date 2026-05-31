@@ -68,7 +68,7 @@ def _autodiscover():
     from broker_adapters.paper import adapter as _paper  # noqa  ← BLOCKER #3 fix
 
     # Naya broker: bas yahan import karo
-    # from broker_adapters.dhan    import adapter as _dhan   # noqa
+    from broker_adapters.dhan    import adapter as _dhan   # noqa  ✅ Dhan registered
     # from broker_adapters.angel   import adapter as _angel  # noqa
     # from broker_adapters.upstox  import adapter as _upstox # noqa
 

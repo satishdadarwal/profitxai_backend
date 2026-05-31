@@ -18,6 +18,7 @@ from .views import (
     feed_status,
     health_check,
     restart_feeds,
+    public_ticker,
 )
 
 urlpatterns = [
@@ -43,4 +44,6 @@ urlpatterns = [
 
     # ── Symbols (short names list) ────────────────────────────
     path("symbols/", SymbolListView.as_view(), name="symbol_list"),
+
+    path("ticker/", public_ticker, name="public_ticker"),  
 ]

@@ -1,73 +1,169 @@
 # apps/strategies/fyers_utils.py
 #
-# Fyers ke liye helper functions:
-# 1. ATM option symbol generate karo
-# 2. Current month futures symbol generate karo
+# FIX 1: _next_thursday() — aaj Thursday ho toh aaj ka expiry use karo (na next week)
+#         Pehle: days_ahead <= 0 → +7 karo (Thursday ko bhi next week jaata tha)
+#         Ab:    days_ahead < 0  → +7 karo (aaj Thursday = days_ahead=0 = aaj ka expiry)
+#
+# FIX 2: get_atm_option_symbol() — format options/services.py ke format_fyers_symbol se match kiya
+#         Fyers weekly option format: NSE:NIFTY26MAY2224500CE  (YY + MON + DD + STRIKE + TYPE)
+#         Pehle: NSE:NIFTY26MAY24500CE (DD nahi tha — invalid symbol!)
+#         Ab:    NSE:NIFTY26MAY2224500CE (DD add kiya)
 
 import datetime
 import logging
-import math
 
 logger = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────
-#  Lot sizes
+#  Lot sizes (NSE April 2025 revision)
 # ─────────────────────────────────────────────────────────────────
 LOT_SIZES = {
-    "NIFTY": 65,
-    "BANKNIFTY": 30,
-    "FINNIFTY": 60,
+    "NIFTY":      65,
+    "BANKNIFTY":  30,
+    "FINNIFTY":   60,
     "MIDCPNIFTY": 120,
-    "SENSEX": 10,
+    "SENSEX":     10,
+    "BANKEX":     15,
 }
 
-# Strike step (nearest ATM strike)
+# Strike step (nearest ATM strike ke liye)
 STRIKE_STEPS = {
-    "NIFTY": 50,
-    "BANKNIFTY": 100,
-    "FINNIFTY": 50,
+    "NIFTY":      50,
+    "BANKNIFTY":  100,
+    "FINNIFTY":   50,
     "MIDCPNIFTY": 25,
-    "SENSEX": 100,
+    "SENSEX":     100,
+    "BANKEX":     100,
 }
+
+# Month codes for Fyers symbol format
+# Weekly options:  single char (1-9, O=Oct, N=Nov, D=Dec)
+# Monthly futures: 3-char (JAN, FEB ... DEC)
+_MONTHS = ["", "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+           "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]
+
+# ✅ FIX: Fyers weekly option format uses single-char month code
+# Jan=1 ... Sep=9, Oct=O, Nov=N, Dec=D
+_WEEKLY_MONTH_CODES = {
+    1: "1", 2: "2", 3: "3", 4: "4", 5: "5",
+    6: "6", 7: "7", 8: "8", 9: "9",
+    10: "O", 11: "N", 12: "D",
+}
+
+
+def _clean_symbol(symbol: str) -> str:
+    """
+    Raw symbol ko base name mein convert karo — LOT_SIZES lookup ke liye.
+
+    Examples:
+        'NSE:NIFTY50-INDEX' → 'NIFTY'
+        'NSE:NIFTYBANK-INDEX' → 'BANKNIFTY'
+        'NIFTY50-INDEX'     → 'NIFTY'
+        'NIFTY'             → 'NIFTY'
+        'BTC-USDT'          → 'BTC-USDT'
+    """
+    raw = symbol.upper().strip()
+
+    for prefix in ("NSE:", "BSE:", "DELTA:"):
+        if raw.startswith(prefix):
+            raw = raw[len(prefix):]
+            break
+
+    SYMBOL_MAP = {
+        "NIFTY50-INDEX":    "NIFTY",
+        "NIFTY50":          "NIFTY",
+        "NIFTYBANK-INDEX":  "BANKNIFTY",
+        "NIFTYBANK":        "BANKNIFTY",
+        "FINNIFTY-INDEX":   "FINNIFTY",
+        "FINNIFTY":         "FINNIFTY",
+        "MIDCPNIFTY-INDEX": "MIDCPNIFTY",
+        "SENSEX-INDEX":     "SENSEX",
+        "BANKEX-INDEX":     "BANKEX",
+    }
+    return SYMBOL_MAP.get(raw, raw)
 
 
 def get_atm_option_symbol(
-    symbol: str, current_price: float, option_type: str
+    symbol: str, current_price: float, option_type: str,
+    user=None,
 ) -> str | None:
     """
     ATM option ka Fyers symbol generate karo.
 
-    Format: NSE:NIFTY25JAN24000CE
-    symbol: 'NIFTY'
-    current_price: 24350.5
-    option_type: 'CE' ya 'PE'
+    Strategy:
+    1. Pehle Fyers option chain API se real symbol fetch karo (most accurate)
+    2. Fallback: constructed symbol use karo
 
-    Returns: 'NSE:NIFTY25JAN24350CE' ya None
+    symbol:        'NIFTY' ya 'NSE:NIFTYBANK-INDEX'
+    current_price: underlying spot price
+    option_type:   'CE' ya 'PE'
+    user:          Django user (option chain fetch ke liye, optional)
     """
     try:
-        sym = symbol.upper()
-        step = STRIKE_STEPS.get(sym, 50)
+        sym  = _clean_symbol(symbol)
 
-        # ATM strike = nearest round number
-        atm_strike = int(round(current_price / step) * step)
-
-        # Current week/month expiry
-        expiry_str = _get_current_expiry(sym)
-        if not expiry_str:
-            logger.error("Expiry calculate nahi ho rahi | symbol=%s", sym)
+        # ✅ Crypto symbols ke liye Fyers options exist nahi karte
+        CRYPTO_SYMBOLS = {
+            "BTC-USDT", "ETH-USDT", "BNB-USDT", "XRP-USDT",
+            "SOL-USDT", "ADA-USDT", "DOGE-USDT", "BTCUSD", "ETHUSD",
+        }
+        if sym in CRYPTO_SYMBOLS or "-USDT" in sym or "-USD" in sym:
+            logger.warning(
+                "Crypto symbol ke liye Fyers options nahi hote — skipping | symbol=%s", symbol
+            )
             return None
 
-        # Fyers format: NSE:NIFTY25JAN24350CE
-        # BSE ke liye SENSEX
-        exchange = "BSE" if sym == "SENSEX" else "NSE"
-        fyers_symbol = f"{exchange}:{sym}{expiry_str}{atm_strike}{option_type}"
+        step = STRIKE_STEPS.get(sym, 50)
+        atm_strike = int(round(current_price / step) * step)
+
+        # ── Strategy 1: Option chain se real Fyers symbol fetch karo ─────────
+        try:
+            from apps.options.nse_fetcher import fetch_nse_option_chain
+            chain_data = fetch_nse_option_chain(symbol=sym, expiry_ts="", user=user)
+            chain = chain_data.get("chain", [])
+
+            # ATM strike row dhundo
+            atm_row = None
+            min_diff = float("inf")
+            for row in chain:
+                diff = abs(row["strike"] - atm_strike)
+                if diff < min_diff:
+                    min_diff = diff
+                    atm_row = row
+
+            if atm_row:
+                opt_data = atm_row.get(option_type, {})
+                real_symbol = opt_data.get("symbol", "")
+                if real_symbol:
+                    logger.info(
+                        "ATM option symbol (from chain): %s | strike=%d | expiry=%s",
+                        real_symbol, atm_row["strike"], atm_row.get("expiry", ""),
+                    )
+                    return real_symbol
+                else:
+                    logger.warning(
+                        "Option chain mein symbol field nahi mila | strike=%d | type=%s — constructed symbol fallback",
+                        atm_strike, option_type,
+                    )
+        except Exception as chain_err:
+            logger.warning("Option chain fetch failed: %s — constructed symbol fallback", chain_err)
+
+        # ── Strategy 2: Construct symbol (fallback) ───────────────────────────
+        expiry_date = _get_current_expiry_date(sym)
+        if not expiry_date:
+            logger.error("Expiry date nahi mili | symbol=%s", sym)
+            return None
+
+        yy  = str(expiry_date.year)[2:]
+        mon = _WEEKLY_MONTH_CODES[expiry_date.month]   # single char: 1-9, O, N, D
+        dd  = str(expiry_date.day).zfill(2)
+        exchange = "BSE" if sym in ("SENSEX", "BANKEX") else "NSE"
+        fyers_symbol = f"{exchange}:{sym}{yy}{mon}{dd}{atm_strike}{option_type}"
 
         logger.info(
-            "ATM option symbol: %s | strike=%d | expiry=%s",
-            fyers_symbol,
-            atm_strike,
-            expiry_str,
+            "ATM option symbol (constructed): %s | strike=%d | expiry=%s",
+            fyers_symbol, atm_strike, expiry_date,
         )
         return fyers_symbol
 
@@ -79,14 +175,39 @@ def get_atm_option_symbol(
 def get_current_futures_symbol(symbol: str) -> str | None:
     """
     Current month futures symbol generate karo.
-
-    Format: NSE:NIFTY25JANFUT
+    Format: NSE:NIFTY26MAYFUT
     """
     try:
-        sym = symbol.upper()
-        exchange = "BSE" if sym == "SENSEX" else "NSE"
-        month_str = _get_current_futures_expiry()
-        fyers_symbol = f"{exchange}:{sym}{month_str}FUT"
+        raw = symbol.upper()
+        for prefix in ("NSE:", "BSE:", "DELTA:"):
+            if raw.startswith(prefix):
+                raw = raw[len(prefix):]
+                break
+
+        SYMBOL_MAP = {
+            "NIFTY50-INDEX":    "NIFTY",
+            "NIFTY50":          "NIFTY",
+            "NIFTYBANK-INDEX":  "BANKNIFTY",
+            "NIFTYBANK":        "BANKNIFTY",
+            "FINNIFTY-INDEX":   "FINNIFTY",
+            "MIDCPNIFTY-INDEX": "MIDCPNIFTY",
+            "SENSEX-INDEX":     "SENSEX",
+        }
+        sym = SYMBOL_MAP.get(raw, raw)
+
+        CRYPTO_SYMBOLS = {
+            "BTC-USDT", "ETH-USDT", "BNB-USDT", "XRP-USDT",
+            "SOL-USDT", "ADA-USDT", "DOGE-USDT", "BTCUSD", "ETHUSD",
+        }
+        if sym in CRYPTO_SYMBOLS or "-USDT" in sym or "-USD" in sym:
+            logger.warning("Crypto symbol Fyers futures ke liye valid nahi | %s", symbol)
+            return None
+
+        expiry_date = _get_current_futures_expiry_date()
+        yy  = str(expiry_date.year)[2:]
+        mon = _MONTHS[expiry_date.month]
+        exchange = "BSE" if sym in ("SENSEX", "BANKEX") else "NSE"
+        fyers_symbol = f"{exchange}:{sym}{yy}{mon}FUT"
 
         logger.info("Futures symbol: %s", fyers_symbol)
         return fyers_symbol
@@ -100,40 +221,36 @@ def get_current_futures_symbol(symbol: str) -> str | None:
 #  Private helpers
 # ─────────────────────────────────────────────────────────────────
 
-
-def _get_current_expiry(symbol: str) -> str | None:
+def _get_current_expiry_date(symbol: str) -> datetime.date | None:
     """
-    Weekly expiry symbols ke liye: NIFTY, BANKNIFTY, FINNIFTY → weekly Thursday
-    Monthly: MIDCPNIFTY, SENSEX → last Thursday of month
+    symbol ka next valid expiry date return karo.
 
-    Returns: '25JAN' format string
+    Weekly symbols (NIFTY, BANKNIFTY, FINNIFTY): next Thursday
+    Monthly symbols (MIDCPNIFTY, SENSEX, BANKEX): last Thursday of month
+
+    FIX: aaj Thursday ho toh aaj ka expiry use karo (pehle +7 ho jaata tha)
     """
-    today = datetime.date.today()
-    sym = symbol.upper()
+    today  = datetime.date.today()
+    sym    = symbol.upper()
 
-    monthly_symbols = ["MIDCPNIFTY", "SENSEX"]
+    monthly_symbols = {"MIDCPNIFTY", "SENSEX", "BANKEX"}
 
     if sym in monthly_symbols:
-        # Last Thursday of current month
         expiry = _last_thursday_of_month(today.year, today.month)
         if expiry < today:
-            # Next month
             if today.month == 12:
                 expiry = _last_thursday_of_month(today.year + 1, 1)
             else:
                 expiry = _last_thursday_of_month(today.year, today.month + 1)
     else:
-        # Next (or current) Thursday
-        expiry = _next_thursday(today)
+        expiry = _next_thursday_or_today(today)
 
-    year_2d = str(expiry.year)[2:]
-    month_3 = expiry.strftime("%b").upper()
-    return f"{year_2d}{month_3}"
+    return expiry
 
 
-def _get_current_futures_expiry() -> str:
-    """Current/next month futures expiry: '25JAN' format"""
-    today = datetime.date.today()
+def _get_current_futures_expiry_date() -> datetime.date:
+    """Current/next month futures expiry date."""
+    today  = datetime.date.today()
     expiry = _last_thursday_of_month(today.year, today.month)
 
     if expiry < today:
@@ -142,27 +259,51 @@ def _get_current_futures_expiry() -> str:
         else:
             expiry = _last_thursday_of_month(today.year, today.month + 1)
 
-    year_2d = str(expiry.year)[2:]
-    month_3 = expiry.strftime("%b").upper()
-    return f"{year_2d}{month_3}"
+    return expiry
 
 
-def _next_thursday(from_date: datetime.date) -> datetime.date:
-    """Agle Thursday ki date (ya aaj agar Thursday hai aur market nahi banda)"""
-    days_ahead = 3 - from_date.weekday()  # Thursday = 3
-    if days_ahead <= 0:
+def _next_thursday_or_today(from_date: datetime.date) -> datetime.date:
+    """
+    Aaj ya agle Thursday ki date return karo.
+
+    FIX: Pehle `days_ahead <= 0` tha — Thursday (weekday=3) ko
+         days_ahead = 3 - 3 = 0, condition True, +7 ho jaata tha.
+         Ab `days_ahead < 0` hai — Thursday ko days_ahead=0 → aaj ka expiry.
+    """
+    days_ahead = 3 - from_date.weekday()  # Thursday = weekday 3
+    if days_ahead < 0:                    # FIX: < 0 (not <= 0)
         days_ahead += 7
     return from_date + datetime.timedelta(days=days_ahead)
 
 
 def _last_thursday_of_month(year: int, month: int) -> datetime.date:
-    """Month ka last Thursday"""
-    # Last day of month
+    """Month ka last Thursday."""
     if month == 12:
         last_day = datetime.date(year + 1, 1, 1) - datetime.timedelta(days=1)
     else:
         last_day = datetime.date(year, month + 1, 1) - datetime.timedelta(days=1)
 
-    # Go back to find Thursday (weekday 3)
     offset = (last_day.weekday() - 3) % 7
     return last_day - datetime.timedelta(days=offset)
+
+
+# ─────────────────────────────────────────────────────────────────
+#  Legacy string-format helpers (signal_router compatibility)
+# ─────────────────────────────────────────────────────────────────
+
+def _get_current_expiry(symbol: str) -> str | None:
+    """Legacy: '26MAY' format string return karo (without DD — NOT used for order symbols)."""
+    expiry = _get_current_expiry_date(symbol)
+    if not expiry:
+        return None
+    yy  = str(expiry.year)[2:]
+    mon = _MONTHS[expiry.month]
+    return f"{yy}{mon}"
+
+
+def _get_current_futures_expiry() -> str:
+    """Legacy: '26MAY' format."""
+    expiry = _get_current_futures_expiry_date()
+    yy  = str(expiry.year)[2:]
+    mon = _MONTHS[expiry.month]
+    return f"{yy}{mon}"

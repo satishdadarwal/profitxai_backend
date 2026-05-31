@@ -358,7 +358,8 @@ register("rsi_reversal", RsiReversalAlgo)
 register("always_hold", AlwaysHoldAlgo)
 register("ict_mtf", IctMtfAlgo)
 register("ict_silver_bullet", SilverBulletAlgo)  # ✅ ICT strategy
-
+from apps.backtest.algos.nse_option_seller import NseOptionSellerAlgo
+register("nse_option_seller", NseOptionSellerAlgo)
 # Alias — backtest/views.py get_strategy import karta hai
 get_strategy = get_algo
 

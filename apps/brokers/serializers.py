@@ -13,9 +13,10 @@ class BrokerAccountSerializer(serializers.ModelSerializer):
         model  = BrokerAccount
         fields = [
             "id", "broker", "label",
-            "app_id",       # Fyers — write only, read mein blank aayega
-            "secret_key",   # write only
-            "api_key",      # Zerodha — write only
+            "app_id",       # Fyers — write only
+            "secret_key",   # Fyers — write only
+            "api_key",      # Zerodha/Delta — write only
+            "api_secret",   # Delta — write only
             "redirect_uri",
             "is_active", "is_verified",
             "created_at", "updated_at",
@@ -26,6 +27,7 @@ class BrokerAccountSerializer(serializers.ModelSerializer):
             "secret_key": {"write_only": True},
             "app_id":     {"write_only": True},
             "api_key":    {"write_only": True},
+            "api_secret": {"write_only": True, "required": False, "allow_null": True, "allow_blank": True},
         }
 
 

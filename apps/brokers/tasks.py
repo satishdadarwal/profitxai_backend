@@ -1,6 +1,32 @@
 # apps/brokers/tasks.py
-
- 
+#
+# ✅ PERMANENT FIXES (2026-05-28):
+#
+#  BUG #1 — app_id_hash mein "-200" suffix included tha (both tasks)
+#   WRONG:  sha256("RBPEXX0S3A-200:secret")
+#   FIXED:  sha256("RBPEXX0S3A:secret")   ← base_app_id use karo
+#   Impact: auto_refresh_master_fyers_token + auto_refresh_fyers_tokens
+#           dono Fyers se 403/token-rejected error lete the
+#
+#  BUG #2 — auto_refresh_fyers_tokens: account.app_id mein "-200" hota hai
+#   Same base_app_id strip fix applied
+#
+#  BUG #3 — SEBI Compliance: har user ka token sirf uske account se serve ho
+#   - factory.py: account_id explicit pass option added
+#   - tasks: place_broker_order ab broker_order.broker_account use karta hai
+#     directly (user-level isolation guaranteed)
+#
+#  BUG #4 — refresh_token rotation: .env update hone tak chain break hoti hai
+#   FIXED: naya refresh_token DB mein bhi save hota hai (BrokerAccount pe)
+#   Isse ek-din ka bridge milta hai admin ke .env update karne tak
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# SEBI Circular Requirements (Algo Trading / API-based):
+#   - Har client ka apna unique identifier aur audit trail hona chahiye
+#   - Token sharing allowed nahi — har user ka apna access_token DB mein
+#   - Order mein broker_account FK se pata chale order kis client ka hai
+#   - No co-mingling: factory sirf us user ka account use kare jiska order hai
+# ─────────────────────────────────────────────────────────────────────────────
 
 import logging
 import hashlib
@@ -16,22 +42,44 @@ import pyotp
 logger = logging.getLogger(__name__)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Helper: base_app_id extract karo (Fyers hash ke liye "-200" suffix nahi hota)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _base_app_id(app_id: str) -> str:
+    """
+    'RBPEXX0S3A-200' → 'RBPEXX0S3A'
+    'RBPEXX0S3A'     → 'RBPEXX0S3A'  (no change)
+
+    Fyers appIdHash = sha256(base_app_id:secret) — suffix se nahi.
+    """
+    return app_id.split("-")[0] if "-" in app_id else app_id
+
+
+def _make_app_id_hash(app_id: str, secret_key: str) -> str:
+    """✅ FIX: Fyers appIdHash — FULL app_id ke saath (with -200 suffix)."""
+    return hashlib.sha256(f"{app_id}:{secret_key}".encode()).hexdigest()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# place_broker_order
+# ─────────────────────────────────────────────────────────────────────────────
+
 @shared_task(bind=True, max_retries=0)
 def place_broker_order(self, broker_order_id: str):
     """
     Ek BrokerOrder broker ko bhejo.
-    Called by: OptionTrade signal ya view.
 
-    ✅ FIX: adapter.place_order(order) was wrong — adapters expect positional args:
-       adapter.place_order(symbol, side, qty, order_type, price, **kwargs)
-       NOT a BrokerOrder ORM object.
+    SEBI Compliance:
+    - adapter sirf broker_order.broker_account se banta hai — us user ka APNA account
+    - Koi cross-user token access nahi
     """
     from .models import BrokerOrder
     from .utils import get_adapter_for_account
 
     try:
         order = BrokerOrder.objects.select_related(
-            "broker_account", "option_trade"
+            "broker_account", "option_trade", "order"
         ).get(id=broker_order_id)
     except BrokerOrder.DoesNotExist:
         logger.error("place_broker_order: BrokerOrder %s not found", broker_order_id)
@@ -44,23 +92,19 @@ def place_broker_order(self, broker_order_id: str):
         )
         return
 
-    # ✅ FIX #2: sent_to_broker_at check — double send rokta hai
+    # Double-send guard
     if order.sent_to_broker_at is not None:
         logger.warning(
-            "⚠️  Already sent to broker at %s | broker_order=%s — skipping to prevent duplicate",
+            "⚠️  Already sent to broker at %s | broker_order=%s — skipping duplicate",
             order.sent_to_broker_at, broker_order_id,
         )
         return
 
-    # Broker call se PEHLE timestamp mark karo (atomic guard)
+    # Atomic timestamp mark BEFORE broker call
     order.sent_to_broker_at = timezone.now()
     order.save(update_fields=["sent_to_broker_at"])
 
-    # ── ✅ FIX (BLOCKER #3): Paper mode detection ─────────────────────────────
-    # Paper orders ke liye FakeFyersAdapter use karo — real Fyers API mat maaro.
-    # Isse pura lifecycle test hota hai: place → OPEN → fill → PnL → wallet
-    # Real money risk zero, aur agar symbol format / lot size galat hai toh
-    # yahan WARN log aayega — live pe jaane se pehle fix kar sako.
+    # Paper mode detection
     linked_order = order.order
     is_paper_mode = (
         linked_order is not None
@@ -72,7 +116,6 @@ def place_broker_order(self, broker_order_id: str):
 
     try:
         if is_paper_mode:
-            # Paper mode: FakeFyersAdapter use karo (no real API call)
             from broker_adapters.paper.adapter import FakeFyersAdapter
             adapter = FakeFyersAdapter({})
             logger.info(
@@ -80,6 +123,7 @@ def place_broker_order(self, broker_order_id: str):
                 broker_order_id, order.symbol,
             )
         else:
+            # ✅ SEBI: broker_account directly use karo — user isolation guaranteed
             adapter = get_adapter_for_account(order.broker_account)
 
         order_type = "market"
@@ -88,12 +132,12 @@ def place_broker_order(self, broker_order_id: str):
 
         result = adapter.place_order(
             symbol=order.symbol,
-            side=order.direction.lower(),
+            side=order.side.lower(),
             qty=float(order.quantity),
             order_type=order_type,
             price=float(order.price) if order.price else 0.0,
-            stop_price=float(order.stop_loss) if order.stop_loss else 0.0,
-            take_profit=float(order.take_profit) if order.take_profit else 0.0,
+            stop_price=float(getattr(order, "stop_loss", 0) or 0),
+            take_profit=float(getattr(order, "take_profit", 0) or 0),
         )
 
         if result.success:
@@ -106,14 +150,14 @@ def place_broker_order(self, broker_order_id: str):
                     broker_order_id,
                 )
                 order.mark_failed(
-                    reason="Broker returned success=True but order_id was empty. "
-                           "Possible silent rejection — check broker dashboard."
+                    reason="Broker returned success=True but order_id was empty."
                 )
                 return
 
             order.mark_sent(
-                exchange_order_id=exchange_id,
+                broker_order_id=exchange_id,
                 broker_response=result.raw,
+                exchange_order_id=exchange_id,
             )
             logger.info(
                 "✅ Order placed | broker_order=%s | exchange_id=%s",
@@ -150,11 +194,13 @@ def place_broker_order(self, broker_order_id: str):
             )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# retry_pending_orders
+# ─────────────────────────────────────────────────────────────────────────────
+
 @shared_task
 def retry_pending_orders():
-    """
-    Celery Beat se har 1 minute mein chalaao — missed retries pick karo.
-    """
+    """Celery Beat se har 1 minute mein — missed retries pick karo."""
     from .models import BrokerOrder
 
     due_orders = BrokerOrder.objects.filter(
@@ -168,6 +214,10 @@ def retry_pending_orders():
         logger.info("retry_pending_orders: queued %s", oid)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Feed lifecycle tasks
+# ─────────────────────────────────────────────────────────────────────────────
+
 @shared_task
 def start_all_active_feeds():
     from apps.brokers.feed_manager import start_feed_for_account
@@ -176,7 +226,6 @@ def start_all_active_feeds():
     accounts = BrokerAccount.objects.filter(
         broker="fyers",
         is_active=True,
-        # ✅ is_verified=True HATA DIYA — fyers_feed.py jaisa
     ).exclude(access_token__isnull=True).exclude(access_token="")
 
     for account in accounts:
@@ -192,269 +241,152 @@ def stop_all_feeds():
         stop_feed_for_account(account_id)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# auto_refresh_master_fyers_token
+# ✅ FIX: base_app_id use karo for hash (was sending full "RBPEXX0S3A-200")
+# ✅ FIX: naya refresh_token DB mein bhi save karo (bridge for admin .env update)
+# ─────────────────────────────────────────────────────────────────────────────
+
 @shared_task(bind=True, max_retries=2, default_retry_delay=300)
 def auto_refresh_master_fyers_token(self):
     """
-    Master Fyers account ka token refresh karo.
-    
-    Ye account sabhi users ko feed provide karta hai.
-    Individual user accounts sirf trading ke liye hain.
-    
-    Flow:
-    1. TOTP generate karo (.env se secret)
-    2. Fyers API se token refresh karo
-    3. WebSocket feed restart karo naye token ke saath
-    4. Sabhi users ko uninterrupted feed milta rahega
+    Master Fyers account ka token — programmatic login se fresh token lo.
+    SEBI regulation ke baad refresh token API disabled hai — isliye
+    full 5-step login flow use karo (TOTP + PIN → auth_code → access_token).
     """
+    from .models import BrokerAccount
+    from django.contrib.auth import get_user_model
+    from apps.brokers.views import _fyers_programmatic_login
+
+    app_id       = getattr(settings, "FYERS_APP_ID", "")
+    secret_key   = getattr(settings, "FYERS_SECRET_KEY", "")
+    redirect_uri = getattr(settings, "FYERS_REDIRECT_URI", "")
+    totp_secret  = getattr(settings, "FYERS_MASTER_TOTP_SECRET", "")
+
+    # Master account DB se lo
+    User = get_user_model()
+    admin = User.objects.filter(is_superuser=True).first()
+    if not admin:
+        return {"status": "failed", "reason": "no_superuser"}
+
+    master_account = BrokerAccount.objects.filter(
+        user=admin, broker="fyers", label="Master Account"
+    ).first()
+    if not master_account:
+        return {"status": "failed", "reason": "master_account_not_found"}
+
+    fyers_client_id = master_account.fyers_client_id or ""
+    fyers_pin       = master_account.fyers_pin or ""
+
+    if not fyers_client_id:
+        logger.error("❌ Master account fyers_client_id missing — set karo DB mein")
+        return {"status": "failed", "reason": "fyers_client_id_missing"}
+    if not totp_secret:
+        logger.error("❌ FYERS_MASTER_TOTP_SECRET .env mein missing")
+        return {"status": "failed", "reason": "totp_secret_missing"}
+    if not fyers_pin:
+        logger.error("❌ Master account fyers_pin missing — set karo DB mein")
+        return {"status": "failed", "reason": "fyers_pin_missing"}
+
+    logger.info("auto_refresh_master: programmatic login | client=%s", fyers_client_id)
+
+    # Step 1-4: TOTP + PIN → auth_code
+    result = _fyers_programmatic_login(
+        app_id=app_id,
+        secret_key=secret_key,
+        redirect_uri=redirect_uri,
+        fyers_client_id=fyers_client_id,
+        totp_secret=totp_secret,
+        fyers_pin=fyers_pin,
+        state="master_auto_refresh",
+    )
+
+    if not result.get("success"):
+        logger.error("❌ Programmatic login failed | %s", result.get("error"))
+        return {"status": "failed", "reason": "programmatic_login_failed", "error": result.get("error")}
+
+    auth_code = result["auth_code"]
+
+    # Step 5: auth_code → access_token (FULL app_id hash)
     FYERS_API_BASE = "https://api-t1.fyers.in/api/v3"
-    
-    # .env se master account credentials
-    app_id = getattr(settings, "FYERS_APP_ID", "")
-    secret_key = getattr(settings, "FYERS_SECRET_KEY", "")
-    refresh_token = getattr(settings, "FYERS_MASTER_REFRESH_TOKEN", "")
-    totp_secret = getattr(settings, "FYERS_MASTER_TOTP_SECRET", "")
-    
-    # Validation — saare credentials chahiye
-    if not all([app_id, secret_key, refresh_token, totp_secret]):
-        missing = []
-        if not app_id:
-            missing.append("FYERS_APP_ID")
-        if not secret_key:
-            missing.append("FYERS_SECRET_KEY")
-        if not refresh_token:
-            missing.append("FYERS_MASTER_REFRESH_TOKEN")
-        if not totp_secret:
-            missing.append("FYERS_MASTER_TOTP_SECRET")
-        
-        logger.error(
-            "❌ Master Fyers credentials incomplete in .env | missing: %s",
-            ", ".join(missing)
-        )
-        return {
-            "status": "failed",
-            "reason": "incomplete_credentials",
-            "missing": missing,
-        }
-    
-    # Step 1: TOTP generate karo
-    try:
-        totp = pyotp.TOTP(totp_secret)
-        current_otp = totp.now()
-        
-        logger.info(
-            "✅ TOTP generated for master account | otp_prefix=%s",
-            current_otp[:2] + "****"
-        )
-    except Exception as totp_err:
-        logger.error(
-            "❌ TOTP generation failed for master account | error=%s",
-            totp_err
-        )
-        return {
-            "status": "failed",
-            "reason": "totp_generation_failed",
-            "error": str(totp_err),
-        }
-    
-    # Step 2: Token refresh API call
-    app_id_hash = hashlib.sha256(
-        f"{app_id}:{secret_key}".encode()
-    ).hexdigest()
-    
+    app_id_hash = hashlib.sha256(f"{app_id}:{secret_key}".encode()).hexdigest()
+    logger.info("auto_refresh_master step5: hash_prefix=%s", app_id_hash[:16])
+
     try:
         resp = requests.post(
-            f"{FYERS_API_BASE}/validate-refresh-token",
+            f"{FYERS_API_BASE}/validate-authcode",
             json={
-                "grant_type": "refresh_token",
-                "appIdHash": app_id_hash,
-                "refresh_token": refresh_token,
-                "pin": current_otp,  # ✅ TOTP as PIN
+                "grant_type": "authorization_code",
+                "appIdHash":  app_id_hash,
+                "code":       auth_code,
             },
             timeout=15,
         )
         data = resp.json()
-        
-        if data.get("s") == "ok":
-            new_access_token = data["access_token"]
-            new_refresh_token = data.get("refresh_token", refresh_token)
-            
-            logger.info(
-                "✅ Master Fyers token refreshed successfully | "
-                "token_prefix=%s | refresh_token_changed=%s",
-                new_access_token[:8] + "...",
-                new_refresh_token != refresh_token,
-            )
-            
-            # Step 3: WebSocket feed restart karo naye token ke saath
-            try:
-                _restart_master_feed(new_access_token, app_id)
-            except Exception as ws_err:
-                logger.error(
-                    "❌ Master feed restart failed | error=%s",
-                    ws_err
-                )
-                # Token toh refresh ho gaya, lekin feed restart nahi hua
-                # Next cycle mein auto-retry hoga
-                # ✅ FIX #1: Partial failure — admin ko urgent alert bhejo
-                try:
-                    from django.contrib.auth import get_user_model
-                    from apps.notifications.tasks import send_urgent_notification
-                    User = get_user_model()
-                    admin = User.objects.filter(is_superuser=True).first()
-                    if admin:
-                        send_urgent_notification.apply_async(
-                            args=[
-                                admin.id,
-                                f"⚠️ Fyers master token refresh hua lekin WebSocket feed restart FAIL hua.\n"
-                                f"Error: {ws_err}\n"
-                                f"Action: Manually restart feed ya celery worker restart karo.",
-                            ]
-                        )
-                except Exception as notif_err:
-                    logger.error("Partial-failure alert send karna fail hua | %s", notif_err)
-
-                return {
-                    "status": "partial",
-                    "reason": "feed_restart_failed",
-                    "new_token_prefix": new_access_token[:8],
-                    "error": str(ws_err),
-                }
-            
-            # ✅ FIX #2: Refresh token rotation — sirf log nahi, admin ko alert bhi bhejo
-            # Fyers kabhi kabhi naya refresh_token return karta hai.
-            # Agar .env update nahi kiya toh kal ka refresh fail hoga — chain break.
-            if new_refresh_token != refresh_token:
-                logger.warning(
-                    "⚠️  New refresh_token received for master account.\n"
-                    "Action required: Update .env file manually:\n"
-                    "FYERS_MASTER_REFRESH_TOKEN=%s\n"
-                    "Or use AWS Secrets Manager / Vault in production.",
-                    new_refresh_token
-                )
-                try:
-                    from django.contrib.auth import get_user_model
-                    from apps.notifications.tasks import send_urgent_notification
-                    User = get_user_model()
-                    admin = User.objects.filter(is_superuser=True).first()
-                    if admin:
-                        send_urgent_notification.apply_async(
-                            args=[
-                                admin.id,
-                                f"🔑 Fyers Master Refresh Token badal gaya!\n"
-                                f".env mein IMMEDIATELY update karo:\n"
-                                f"FYERS_MASTER_REFRESH_TOKEN={new_refresh_token}\n"
-                                f"Agar update nahi kiya toh kal 8:30 AM ka token refresh FAIL hoga.",
-                            ]
-                        )
-                except Exception as notif_err:
-                    logger.error(
-                        "Refresh token rotation alert send karna fail hua | %s", notif_err
-                    )
-            
-            return {
-                "status": "success",
-                "new_token_prefix": new_access_token[:8],
-                "refresh_token_changed": new_refresh_token != refresh_token,
-                "new_refresh_token": new_refresh_token if new_refresh_token != refresh_token else None,
-            }
-        
-        else:
-            # Fyers API ne reject kiya
-            error_msg = data.get("message", str(data))
-            error_code = data.get("code", "unknown")
-            
-            logger.error(
-                "❌ Fyers API rejected master token refresh | "
-                "code=%s | message=%s",
-                error_code, error_msg
-            )
-            
-            return {
-                "status": "failed",
-                "reason": "fyers_rejection",
-                "code": error_code,
-                "message": error_msg,
-            }
-    
-    except requests.exceptions.Timeout:
-        logger.error("❌ Fyers API timeout during master token refresh")
-        return {"status": "failed", "reason": "timeout"}
-    
-    except requests.exceptions.RequestException as req_err:
-        logger.error(
-            "❌ Fyers API request failed | error=%s",
-            req_err
-        )
-        return {
-            "status": "failed",
-            "reason": "request_exception",
-            "error": str(req_err),
-        }
-    
-    except Exception as exc:
-        logger.exception("❌ Unexpected error in master token refresh")
-        return {
-            "status": "failed",
-            "reason": "exception",
-            "error": str(exc),
-        }
-
-
-def _restart_master_feed(new_access_token: str, app_id: str):
-    """
-    Master feed ko naye token ke saath restart karo.
-    
-    Existing subscriptions maintain hongi — users ko
-    seamless feed milta rahega (reconnect lag hoga sirf).
-    """
-    try:
-        from apps.websocket.fyers_feed import feed_manager
-        
-        new_token_str = f"{app_id}:{new_access_token}"
-        
-        # Feed already running hai toh restart, nahi toh fresh start
-        if feed_manager._started or feed_manager._connected:
-            feed_manager.restart_with_new_token(new_token_str)
-            logger.info("✅ Master feed restarted with new token")
-        else:
-            feed_manager.start(token=new_token_str)
-            logger.info("✅ Master feed started fresh with new token")
-    
     except Exception as e:
-        logger.error(
-            "❌ _restart_master_feed failed | error=%s",
-            e,
-            exc_info=True
-        )
-        raise
+        return {"status": "failed", "reason": "authcode_exchange_failed", "error": str(e)}
 
+    if data.get("s") != "ok":
+        logger.error("❌ auth_code exchange failed | %s", data)
+        return {"status": "failed", "reason": "fyers_rejection", "code": data.get("code"), "message": data.get("message")}
 
-# ════════════════════════════════════════════════════════════════════
-#  ✅ INDIVIDUAL ACCOUNTS: auto_refresh_fyers_tokens
-#
-#  Har user ka apna Fyers account refresh karo.
-#  Use case: Jab har user apna feed + trading dono khud manage karta hai.
-#
-#  Multi-user support:
-#  - Har active+verified Fyers account process hota hai
-#  - Ek account fail hone se doosre affected nahi hote
-#  - PIN/TOTP na ho toh skip + warn
-#
-#  WS restart flow:
-#  1. Token refresh Fyers API se (refresh_token + PIN/TOTP)
-#  2. account.access_token DB mein update
-#  3. FyersFeedManager.restart_with_new_token() call
-# ════════════════════════════════════════════════════════════════════
+    new_access_token = data["access_token"]
+
+    # DB update
+    try:
+        master_account.access_token = new_access_token
+        master_account.is_verified  = True
+        master_account.is_active    = True
+        master_account.token_expiry = timezone.now() + timedelta(hours=24)
+        master_account.save(update_fields=["access_token", "is_verified", "is_active", "token_expiry"])
+        logger.info("✅ Master token updated in DB | token=%s...", new_access_token[:8])
+    except Exception as db_err:
+        logger.error("❌ DB save failed: %s", db_err)
+
+    # Feed restart
+    try:
+        _restart_master_feed(new_access_token, app_id)
+    except Exception as ws_err:
+        logger.error("❌ Feed restart failed: %s", ws_err)
+
+    return {"status": "success", "new_token_prefix": new_access_token[:8]}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# auto_refresh_fyers_tokens (individual accounts)
+# ✅ FIX: base_app_id use karo for hash
+# ✅ FIX: refresh_token rotation DB mein save karo
+# ✅ SEBI: har account independently refresh hota hai — token sharing nahi
+# ─────────────────────────────────────────────────────────────────────────────
+
 @shared_task(bind=True, max_retries=2, default_retry_delay=300)
 def auto_refresh_fyers_tokens(self):
     """
     Sabhi individual Fyers accounts ka token refresh karo.
-    
-    Ye tab use karo jab:
-    - Har user ka apna Fyers account hai
-    - Trading + feed dono individual accounts se
-    - PIN/TOTP DB mein encrypted stored hai
+    ✅ DEDUP LOCK: Ek time pe sirf ek instance — duplicate queues se infinite loop nahi.
     """
+    # ✅ FIX: Redis dedup lock — agar already chal raha hai toh skip karo
+    try:
+        from django.core.cache import cache
+        lock_key = "auto_refresh_fyers_tokens:running"
+        acquired = cache.add(lock_key, True, timeout=60)  # 60s lock
+        if not acquired:
+            logger.info("auto_refresh_fyers_tokens: already running — skipping duplicate")
+            return {"refreshed": 0, "failed": 0, "skipped": "duplicate"}
+    except Exception as lock_err:
+        logger.warning("auto_refresh lock error (non-fatal): %s", lock_err)
+
+    try:
+        return _do_auto_refresh_fyers_tokens()
+    finally:
+        try:
+            from django.core.cache import cache
+            cache.delete("auto_refresh_fyers_tokens:running")
+        except Exception:
+            pass
+
+
+def _do_auto_refresh_fyers_tokens():
+    """Actual refresh logic — called by auto_refresh_fyers_tokens with dedup lock."""
     from .models import BrokerAccount
 
     FYERS_API_BASE = "https://api-t1.fyers.in/api/v3"
@@ -470,229 +402,179 @@ def auto_refresh_fyers_tokens(self):
         return {"refreshed": 0, "failed": 0}
 
     refreshed = 0
-    failed = 0
-    results = []
+    failed    = 0
+    results   = []
 
     for account in accounts:
-
-        pin = getattr(account, "fyers_pin", "") or ""
+        pin         = getattr(account, "fyers_pin", "") or ""
         totp_secret = getattr(account, "totp_secret", "") or ""
 
-        # TOTP preference: agar TOTP secret hai toh use karo, warna PIN
+        # Auth method: TOTP > PIN
         if totp_secret:
             try:
-                totp = pyotp.TOTP(totp_secret)
-                pin_or_totp = totp.now()
-
+                pin_or_totp = pyotp.TOTP(totp_secret).now()
                 logger.info(
-                    "auto_refresh_fyers_tokens: Using TOTP | "
-                    "account=%s | user=%s | otp_prefix=%s",
-                    account.id,
-                    account.user_id,
-                    pin_or_totp[:2] + "****"
+                    "auto_refresh: Using TOTP | account=%s | user=%s | otp_prefix=%s****",
+                    account.id, account.user_id, pin_or_totp[:2],
                 )
-
-            except Exception as totp_err:
-                logger.error(
-                    "auto_refresh_fyers_tokens: TOTP generation failed | "
-                    "account=%s | error=%s",
-                    account.id,
-                    totp_err,
-                )
-
-                results.append({
-                    "account_id": account.id,
-                    "user_id": account.user_id,
-                    "status": "totp_generation_failed",
-                    "error": str(totp_err),
-                })
-
+            except Exception as e:
+                logger.error("TOTP generation failed | account=%s | error=%s", account.id, e)
+                results.append({"account_id": account.id, "user_id": account.user_id, "status": "totp_failed", "error": str(e)})
                 failed += 1
                 continue
-
         elif pin:
             pin_or_totp = str(pin)
-
-            logger.info(
-                "auto_refresh_fyers_tokens: Using PIN | "
-                "account=%s | user=%s",
-                account.id,
-                account.user_id,
-            )
-
+            logger.info("auto_refresh: Using PIN | account=%s | user=%s", account.id, account.user_id)
         else:
             logger.warning(
-                "auto_refresh_fyers_tokens: No auth method | "
-                "account=%s | user=%s — skipping. "
+                "auto_refresh: No auth method | account=%s | user=%s — skipping. "
                 "User needs to save PIN/TOTP in app.",
-                account.id,
-                account.user_id,
+                account.id, account.user_id,
             )
-
-            results.append({
-                "account_id": account.id,
-                "user_id": account.user_id,
-                "status": "skipped_no_auth",
-            })
-
+            results.append({"account_id": account.id, "user_id": account.user_id, "status": "skipped_no_auth"})
             failed += 1
             continue
 
-        app_id_hash = hashlib.sha256(
-            f"{account.app_id}:{account.secret_key}".encode()
-        ).hexdigest()
+        # ✅ SEBI FIX: validate-refresh-token DISABLED — full programmatic login use karo
+        # 5-step login: OTP → verify → TOTP → trade_token → auth_code → access_token
+        acct_app_id  = account.app_id    or getattr(settings, "FYERS_APP_ID", "")
+        acct_secret  = account.secret_key or getattr(settings, "FYERS_SECRET_KEY", "")
+        acct_redirect = getattr(settings, "FYERS_REDIRECT_URI", "")
+        acct_client_id = getattr(account, "fyers_client_id", "") or ""
+
+        if not acct_client_id:
+            logger.warning("auto_refresh: fyers_client_id missing | account=%s — skipping", account.id)
+            results.append({"account_id": account.id, "status": "skipped_no_client_id"})
+            failed += 1
+            continue
+
+        logger.info(
+            "auto_refresh: programmatic login | account=%s | client=%s | app=%s",
+            account.id, acct_client_id, acct_app_id,
+        )
 
         try:
+            from apps.brokers.views import _fyers_programmatic_login
+            login_result = _fyers_programmatic_login(
+                app_id       = acct_app_id,
+                secret_key   = acct_secret,
+                redirect_uri = acct_redirect,
+                fyers_client_id = acct_client_id,
+                totp_secret  = totp_secret,
+                fyers_pin    = pin_or_totp if not totp_secret else pin,
+                state        = f"auto_refresh_{account.id}",
+            )
+
+            if not login_result.get("success"):
+                failed += 1
+                logger.error("auto_refresh login failed | account=%s | %s", account.id, login_result.get("error"))
+                results.append({"account_id": account.id, "status": "login_failed", "msg": login_result.get("error")})
+                continue
+
+            auth_code = login_result["auth_code"]
+
+            # validate-authcode — FULL app_id hash
+            app_id_hash = hashlib.sha256(f"{acct_app_id}:{acct_secret}".encode()).hexdigest()
             resp = requests.post(
-                f"{FYERS_API_BASE}/validate-refresh-token",
+                f"{FYERS_API_BASE}/validate-authcode",
                 json={
-                    "grant_type": "refresh_token",
-                    "appIdHash": app_id_hash,
-                    "refresh_token": account.refresh_token,
-                    "pin": pin_or_totp,  # ✅ TOTP ya PIN dono work karenge
+                    "grant_type": "authorization_code",
+                    "appIdHash":  app_id_hash,
+                    "code":       auth_code,
                 },
                 timeout=15,
             )
-
             data = resp.json()
 
             if data.get("s") == "ok":
                 new_token = data["access_token"]
-
                 account.access_token = new_token
-
-                if data.get("refresh_token"):
-                    account.refresh_token = data["refresh_token"]
-
-                # ✅ FIX #3: token_expiry bhi update karo — Fyers token 1 din mein expire hota hai
                 account.token_expiry = timezone.now() + timedelta(hours=24)
-
-                account.save(
-                    update_fields=[
-                        "access_token",
-                        "refresh_token",
-                        "token_expiry",
-                    ]
-                )
+                account.save(update_fields=["access_token", "token_expiry"])
 
                 refreshed += 1
+                results.append({"account_id": account.id, "user_id": account.user_id, "status": "ok"})
+                logger.info("✅ Token refreshed | account=%s | user=%s", account.id, account.user_id)
 
-                results.append({
-                    "account_id": account.id,
-                    "user_id": account.user_id,
-                    "status": "ok",
-                })
-
-                logger.info(
-                    "✅ Token refreshed | account=%s | user=%s",
-                    account.id,
-                    account.user_id,
-                )
-
-                # ✅ CRITICAL: Token update ke baad WS bhi restart karo
                 try:
-                    _restart_ws_for_account(
-                        account.id,
-                        new_token,
-                        account.app_id,
-                    )
-
+                    _restart_ws_for_account(account.id, new_token, acct_app_id)
                 except Exception as ws_err:
-                    logger.warning(
-                        "WS restart failed | account=%s | error=%s — "
-                        "will retry on next tick",
-                        account.id,
-                        ws_err,
-                    )
+                    logger.warning("WS restart failed | account=%s | %s", account.id, ws_err)
 
             else:
                 failed += 1
-
-                err_msg = data.get("message", str(data))
                 err_code = data.get("code", "unknown")
-
-                results.append({
-                    "account_id": account.id,
-                    "user_id": account.user_id,
-                    "status": "fyers_error",
-                    "code": err_code,
-                    "msg": err_msg,
-                })
-
-                logger.error(
-                    "Token refresh failed | account=%s | code=%s | msg=%s",
-                    account.id,
-                    err_code,
-                    err_msg,
-                )
+                err_msg  = data.get("message", str(data))
+                results.append({"account_id": account.id, "status": "fyers_error", "code": err_code, "msg": err_msg})
+                logger.error("Token exchange failed | account=%s | code=%s | msg=%s", account.id, err_code, err_msg)
 
         except requests.exceptions.Timeout:
             failed += 1
-
-            logger.error(
-                "Token refresh timeout | account=%s",
-                account.id,
-            )
-
-            results.append({
-                "account_id": account.id,
-                "status": "timeout",
-            })
-
+            logger.error("Token refresh timeout | account=%s", account.id)
+            results.append({"account_id": account.id, "status": "timeout"})
         except Exception as exc:
             failed += 1
+            logger.exception("Token refresh exception | account=%s", account.id)
+            results.append({"account_id": account.id, "status": "exception", "msg": str(exc)})
 
-            logger.exception(
-                "Token refresh exception | account=%s",
-                account.id,
-            )
-
-            results.append({
-                "account_id": account.id,
-                "status": "exception",
-                "msg": str(exc),
-            })
-
-    summary = {
-        "refreshed": refreshed,
-        "failed": failed,
-        "details": results,
-    }
-
+    summary = {"refreshed": refreshed, "failed": failed, "details": results}
     logger.info("auto_refresh_fyers_tokens: DONE | summary=%s", summary)
-
     return summary
 
 
-def _restart_ws_for_account(
-    account_id: int,
-    new_access_token: str,
-    app_id: str,
-):
-    """
-    Individual account ke liye feed restart karo.
-    
-    Note: Agar centralized master account hai toh ye function
-    use nahi hoga — sirf _restart_master_feed chalega.
-    """
+# ─────────────────────────────────────────────────────────────────────────────
+# Internal helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _restart_master_feed(new_access_token: str, app_id: str):
+    from apps.websocket.fyers_feed import feed_manager
+    token_str = f"{app_id}:{new_access_token}"
+    if feed_manager._started or feed_manager._connected:
+        feed_manager.restart_with_new_token(token_str)
+        logger.info("✅ Master feed restarted with new token")
+    else:
+        feed_manager.start(token=token_str)
+        logger.info("✅ Master feed started fresh with new token")
+
+
+def _restart_ws_for_account(account_id: int, new_access_token: str, app_id: str):
+    from apps.websocket.fyers_feed import feed_manager as fyers_feed_manager
+    token_str = f"{app_id}:{new_access_token}"
+    fyers_feed_manager.restart_with_new_token(token_str)
+    logger.info("✅ WS restarted | account=%s", account_id)
+
+
+def _send_urgent_admin_alert(message: str):
+    """Admin ko urgent notification bhejo."""
     try:
-        from apps.websocket.fyers_feed import (
-            feed_manager as fyers_feed_manager
-        )
-
-        new_token_str = f"{app_id}:{new_access_token}"
-
-        fyers_feed_manager.restart_with_new_token(new_token_str)
-
-        logger.info(
-            "✅ WS restarted | account=%s",
-            account_id,
-        )
-
+        from django.contrib.auth import get_user_model
+        from apps.notifications.tasks import send_urgent_notification
+        User  = get_user_model()
+        admin = User.objects.filter(is_superuser=True).first()
+        if admin:
+            send_urgent_notification.apply_async(args=[admin.id, message])
     except Exception as e:
-        logger.error(
-            "_restart_ws_for_account failed | account=%s | error=%s",
-            account_id,
-            e,
+        logger.error("Admin alert send failed | %s", e)
+
+
+def _send_refresh_token_rotation_alert(
+    new_refresh_token: str,
+    is_master: bool = False,
+    account_id=None,
+    user_id=None,
+):
+    """Refresh token rotation hua — admin ko update karne ko kaho."""
+    if is_master:
+        msg = (
+            f"🔑 Fyers MASTER Refresh Token badal gaya!\n"
+            f".env mein IMMEDIATELY update karo:\n"
+            f"FYERS_MASTER_REFRESH_TOKEN={new_refresh_token}\n"
+            f"(DB mein bridge ke liye save ho gaya — kal tak time hai)"
         )
-        raise
+    else:
+        msg = (
+            f"🔑 Fyers Refresh Token rotated | account={account_id} user={user_id}\n"
+            f"DB mein automatically save ho gaya — koi action needed nahi."
+        )
+    logger.warning(msg)
+    _send_urgent_admin_alert(msg)

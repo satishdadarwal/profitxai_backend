@@ -17,6 +17,7 @@ class BrokerAccount(models.Model):
         BINANCE = "binance", "Binance"
         FYERS   = "fyers",   "Fyers"
         DELTA   = "delta",   "Delta"
+        DHAN    = "dhan",    "Dhan"
 
     user         = models.ForeignKey(User, on_delete=models.CASCADE, related_name="broker_accounts")
     broker       = models.CharField(max_length=20, choices=BrokerType.choices)
@@ -31,10 +32,43 @@ class BrokerAccount(models.Model):
     api_key      = models.CharField(max_length=255, blank=True, default="")
     api_secret   = models.CharField(max_length=255, blank=True, null=True)
 
+    # ── Dhan credentials ──────────────────────────────────────────────────────
+    dhan_client_id = models.CharField(
+        max_length=50, blank=True, default="",
+        help_text="Dhan Client ID (e.g. '1000000001')",
+    )
+    dhan_access_token = models.TextField(
+        blank=True, default="",
+        help_text="Dhan access token (24hr validity — SEBI mandate)",
+    )
+
+    # ── Zerodha credentials ───────────────────────────────────────────────────
+    zerodha_user_id = models.CharField(
+        max_length=20, blank=True, default="",
+        db_index=True,
+        help_text="Zerodha User ID (e.g. 'AB1234') — from OAuth response",
+    )
+    zerodha_request_token = models.CharField(
+        max_length=500, blank=True, default="",
+        help_text="Temporary request_token (cleared after exchange)",
+    )
+
     # ── Tokens ────────────────────────────────────────────────────────────────
     access_token  = models.TextField(blank=True, null=True)
     refresh_token = models.TextField(blank=True, null=True)
     token_expiry  = models.DateTimeField(blank=True, null=True)
+
+    # ── Fyers client ID (multi-user account identification) ───────────────────
+    fyers_client_id = models.CharField(
+        max_length=20,
+        blank=True,
+        default="",
+        db_index=True,
+        help_text=(
+            "User ka Fyers client ID (e.g. 'YC00329'). "
+            "Auto-login aur multi-user account identification ke liye."
+        ),
+    )
 
     # ── Fyers daily auto-refresh PIN (Fernet encrypted at rest) ───────────────
     # User ek baar Flutter app se save karta hai.
@@ -62,6 +96,20 @@ class BrokerAccount(models.Model):
 
     class Meta:
         unique_together = [("user", "broker", "label")]
+        indexes = [
+            # Fast lookup: FyersAutoLoginView + auto_refresh_fyers_tokens
+            # filter(user=X, broker="fyers", fyers_client_id=Y)
+            models.Index(
+                fields=["user", "broker", "fyers_client_id"],
+                name="ba_user_broker_client_idx",
+            ),
+            # Fast lookup: factory._get_adapter_for_user()
+            # filter(user=X, broker="fyers", is_active=True, is_verified=True)
+            models.Index(
+                fields=["user", "broker", "is_active", "is_verified"],
+                name="ba_user_broker_active_idx",
+            ),
+        ]
 
     def __str__(self):
         return f"{self.user} - {self.broker} - {self.label}"

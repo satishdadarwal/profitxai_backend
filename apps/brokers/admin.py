@@ -12,7 +12,8 @@ from django.conf import settings
 
 from .models import BrokerAccount
 
-FYERS_API_BASE = "https://api-t1.fyers.in/api/v3"
+FYERS_API_BASE  = "https://api-t1.fyers.in/api/v3"   # Trading + Auth login page (browser redirect)
+FYERS_AUTH_BASE = "https://api-t2.fyers.in/api/v3"   # Token exchange REST calls only
 
 
 @admin.register(BrokerAccount)
@@ -59,11 +60,22 @@ class BrokerAccountAdmin(admin.ModelAdmin):
         }),
     )
 
-    actions = ["mark_active", "mark_inactive", "generate_fyers_login_url"]
+    actions = ["mark_active", "mark_inactive", "generate_fyers_login_url", "refresh_tokens_now"]
 
     # ── List display helpers ──────────────────────────────────
 
     def token_status(self, obj):
+        # Delta = API key based, no access_token needed
+        if obj.broker == "delta":
+            has_key = bool(obj.api_key)
+            if has_key:
+                return format_html(
+                    '<span style="color:green;font-weight:bold">✅ API Key Set</span>'
+                )
+            return format_html(
+                '<span style="color:red;font-weight:bold">❌ No API Key</span>'
+            )
+        # Fyers / others = token based
         if obj.access_token:
             return format_html(
                 '<span style="color:green;font-weight:bold">✅ Token Set</span>'
@@ -129,8 +141,121 @@ class BrokerAccountAdmin(admin.ModelAdmin):
                 self.admin_site.admin_view(self.fyers_login_view),
                 name="brokers_fyers_login",
             ),
+            path(
+                "refresh-all-tokens/",
+                self.admin_site.admin_view(self.refresh_all_tokens_view),
+                name="brokers_refresh_all_tokens",
+            ),
         ]
         return custom + urls
+
+    def refresh_all_tokens_view(self, request):
+        """Sabhi Fyers accounts ka token ek sath refresh karo — programmatic login se."""
+        from django.http import HttpResponse
+        from django.utils import timezone
+        import pyotp, hashlib, requests as req_lib
+
+        accounts = BrokerAccount.objects.filter(
+            broker="fyers", is_active=True, is_verified=True
+        )
+
+        results = []
+        for account in accounts:
+            client_id  = getattr(account, "fyers_client_id", "") or ""
+            totp_secret = getattr(account, "totp_secret", "") or ""
+            pin        = getattr(account, "fyers_pin", "") or ""
+            app_id     = account.app_id or getattr(settings, "FYERS_APP_ID", "")
+            secret_key = account.secret_key or getattr(settings, "FYERS_SECRET_KEY", "")
+            redirect_uri = account.redirect_uri or settings.FYERS_REDIRECT_URI
+
+            if not client_id or not totp_secret or not pin:
+                results.append({
+                    "account": str(account),
+                    "status": "⚠️ SKIPPED",
+                    "reason": f"client_id/totp/pin missing (client_id={client_id or 'EMPTY'})",
+                })
+                continue
+
+            try:
+                from apps.brokers.views import _fyers_programmatic_login
+                login = _fyers_programmatic_login(
+                    app_id=app_id, secret_key=secret_key,
+                    redirect_uri=redirect_uri, fyers_client_id=client_id,
+                    totp_secret=totp_secret, fyers_pin=pin,
+                    state=f"admin_refresh_{account.id}",
+                )
+                if not login.get("success"):
+                    results.append({
+                        "account": str(account),
+                        "status": "❌ LOGIN FAILED",
+                        "reason": login.get("error", "unknown"),
+                    })
+                    continue
+
+                auth_code = login["auth_code"]
+                h = hashlib.sha256(f"{app_id}:{secret_key}".encode()).hexdigest()
+                resp = req_lib.post(
+                    "https://api-t1.fyers.in/api/v3/validate-authcode",
+                    json={"grant_type": "authorization_code", "appIdHash": h, "code": auth_code},
+                    timeout=15,
+                )
+                data = resp.json()
+
+                if data.get("s") == "ok":
+                    from datetime import timedelta
+                    account.access_token = data["access_token"]
+                    account.token_expiry = timezone.now() + timedelta(hours=24)
+                    account.save(update_fields=["access_token", "token_expiry"])
+                    results.append({
+                        "account": str(account),
+                        "status": "✅ SUCCESS",
+                        "reason": f"Token: {data['access_token'][:12]}...",
+                    })
+                else:
+                    results.append({
+                        "account": str(account),
+                        "status": "❌ TOKEN FAILED",
+                        "reason": data.get("message", str(data)),
+                    })
+            except Exception as e:
+                results.append({
+                    "account": str(account),
+                    "status": "❌ ERROR",
+                    "reason": str(e)[:100],
+                })
+
+        # HTML response
+        rows = "".join(
+            f"""<tr>
+                <td style="padding:8px 12px;border-bottom:1px solid #eee">{r['account']}</td>
+                <td style="padding:8px 12px;border-bottom:1px solid #eee;font-weight:bold">{r['status']}</td>
+                <td style="padding:8px 12px;border-bottom:1px solid #eee;color:#666;font-size:12px">{r['reason']}</td>
+            </tr>"""
+            for r in results
+        )
+
+        html = f"""<!DOCTYPE html>
+<html><head><title>Refresh All Tokens</title><meta charset="utf-8">
+<style>
+  body{{font-family:sans-serif;max-width:900px;margin:40px auto;padding:20px;background:#f8f9fa}}
+  .card{{background:white;border-radius:12px;padding:30px;box-shadow:0 2px 10px rgba(0,0,0,0.1)}}
+  h1{{color:#417690}} table{{width:100%;border-collapse:collapse}}
+  th{{background:#417690;color:white;padding:10px 12px;text-align:left}}
+  .btn{{display:inline-block;padding:10px 20px;background:#417690;color:white;
+        text-decoration:none;border-radius:6px;margin-top:20px}}
+</style></head><body>
+<div class="card">
+  <h1>🔄 Token Refresh — All Fyers Accounts</h1>
+  <p style="color:#666">{timezone.now().strftime('%d %b %Y, %I:%M %p')} pe refresh kiya</p>
+  <table>
+    <tr><th>Account</th><th>Status</th><th>Details</th></tr>
+    {rows}
+  </table>
+  <a href="{reverse('admin:brokers_brokeraccount_changelist')}" class="btn">← Back to Broker Accounts</a>
+  <a href="{reverse('admin:brokers_refresh_all_tokens')}" class="btn" style="background:#28a745;margin-left:10px">🔄 Refresh Again</a>
+</div></body></html>"""
+
+        return HttpResponse(html)
 
     # ── Fyers Login View — browser mein login page kholo ─────
 
@@ -160,13 +285,31 @@ class BrokerAccountAdmin(admin.ModelAdmin):
 
         # Auth URL banao
         redirect_uri = account.redirect_uri or settings.FYERS_REDIRECT_URI
+        # ✅ FIX: state mein user_id:account_id dono encode karo
+        #         Callback mein exact account identify ho sake
+        if account.label in ("Master Account", "fyers masters"):
+            state_param = "master_setup"
+        else:
+            state_param = f"{account.user.id}__{account.pk}"
+
         from urllib.parse import quote
+        import logging
+        _log = logging.getLogger(__name__)
+
+        # ✅ CORRECT ENDPOINTS (SDK confirmed):
+        # Browser redirect (login page) → api-t1.fyers.in/api/v3/generate-authcode
+        # Token exchange (backend REST) → api-t2.fyers.in/api/v3/validate-authcode
         auth_url = (
-            f"https://api-t1.fyers.in/api/v3/generate-authcode"
+            f"{FYERS_API_BASE}/generate-authcode"
             f"?client_id={account.app_id}"
             f"&redirect_uri={quote(redirect_uri, safe='')}"
             f"&response_type=code"
-            f"&state=master_setup"
+            f"&state={state_param}"
+        )
+
+        _log.info(
+            "FYERS AUTH URL | account=%s | app_id='%s' | state='%s'",
+            account.id, account.app_id, state_param,
         )
 
         # HTML page return karo
@@ -333,6 +476,11 @@ class BrokerAccountAdmin(admin.ModelAdmin):
 
     # ── Bulk Actions ──────────────────────────────────────────
 
+    def changelist_view(self, request, extra_context=None):
+        extra_context = extra_context or {}
+        extra_context['refresh_all_url'] = reverse('admin:brokers_refresh_all_tokens')
+        return super().changelist_view(request, extra_context=extra_context)
+
     def mark_active(self, request, queryset):
         queryset.update(is_active=True)
         self.message_user(request, f"{queryset.count()} accounts marked active")
@@ -343,6 +491,11 @@ class BrokerAccountAdmin(admin.ModelAdmin):
         self.message_user(request, f"{queryset.count()} accounts marked inactive")
     mark_inactive.short_description = "❌ Mark Inactive"
 
+    def refresh_tokens_now(self, request, queryset):
+        """Selected accounts ka token refresh karo."""
+        return HttpResponseRedirect(reverse("admin:brokers_refresh_all_tokens"))
+    refresh_tokens_now.short_description = "🔄 Refresh All Fyers Tokens Now"
+
     def generate_fyers_login_url(self, request, queryset):
         fyers_accounts = queryset.filter(broker="fyers")
         if not fyers_accounts.exists():
@@ -352,4 +505,4 @@ class BrokerAccountAdmin(admin.ModelAdmin):
         return HttpResponseRedirect(
             reverse("admin:brokers_fyers_login", args=[account.pk])
         )
-    generate_fyers_login_url.short_description = "🔐 Fyers Login Page Kholo"
+    generate_fyers_login_url.short_description = "🔐 Fyers Login Page Kholo"# DEBUG PATCH - temporary

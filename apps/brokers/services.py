@@ -1,4 +1,4 @@
-# apps/brokers/services.py — REPLACE karo poora
+# apps/brokers/services.py
 
 from .models import BrokerAccount
 
@@ -28,6 +28,13 @@ def get_user_broker_adapter(user, broker_slug=None):
             is_async=False,
         )
         return fyers
+
+    elif account.broker == "dhan":
+        from broker_adapters.registry import BrokerRegistry
+        return BrokerRegistry.make("dhan", {
+            "dhan_client_id":    account.dhan_client_id,
+            "dhan_access_token": account.dhan_access_token,
+        })
 
     elif account.broker == "delta":
         return account  # Direct account return — signal_router handle karega

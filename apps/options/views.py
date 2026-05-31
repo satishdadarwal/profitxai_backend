@@ -50,6 +50,25 @@ from .nse_fetcher import fetch_nse_option_chain
 logger = logging.getLogger(__name__)
 
 
+def _order_success(resp) -> bool:
+    """FyersAdapter returns OrderResult dataclass; fallback dict ke liye bhi kaam karta hai."""
+    if hasattr(resp, "success"):
+        return bool(resp.success)
+    return bool(resp.get("success")) if isinstance(resp, dict) else False
+
+
+def _order_id(resp) -> str | None:
+    if hasattr(resp, "order_id"):
+        return resp.order_id
+    return resp.get("order_id") if isinstance(resp, dict) else None
+
+
+def _order_message(resp) -> str:
+    if hasattr(resp, "message"):
+        return resp.message or ""
+    return resp.get("message", "Unknown error") if isinstance(resp, dict) else "Unknown error"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  OPTION CHAIN - Live Market Data
 # ─────────────────────────────────────────────────────────────────────────────
@@ -179,14 +198,14 @@ class LiveOptionTradeView(APIView):
         qs = OptionTrade.objects.filter(
             user=request.user, 
             mode="live"
-        ).select_related("symbol", "contract", "option_contract").order_by("-entry_time")
+        ).select_related("symbol", "contract").order_by("-entry_time")
 
         if status_filter != "all":
             qs = qs.filter(status=status_filter)
 
         trades_data = []
         for trade in qs[:limit]:
-            contract = trade.contract or trade.option_contract
+            contract = trade.contract
             if not contract:
                 continue
                 
@@ -392,17 +411,17 @@ class LiveOptionTradeView(APIView):
                 # Place the order
                 order_response = adapter.place_order(
                     symbol=fyers_symbol,
-                    quantity=quantity,
                     side=trade_type,
+                    qty=quantity,
                     order_type=order_type,
-                    price=limit_price,
-                    product_type="INTRADAY"  # Options are typically intraday
+                    price=limit_price or 0,
+                    product_type="INTRADAY",
                 )
                 
-                if not order_response.get("success"):
-                    logger.error("Broker order failed: %s", order_response.get("message"))
+                if not _order_success(order_response):
+                    logger.error("Broker order failed: %s", _order_message(order_response))
                     return Response({
-                        "error": f"Order placement failed: {order_response.get('message', 'Unknown error')}"
+                        "error": f"Order placement failed: {_order_message(order_response)}"
                     }, status=status.HTTP_400_BAD_REQUEST)
                 
                 # Create OptionTrade record
@@ -410,7 +429,7 @@ class LiveOptionTradeView(APIView):
                     user=request.user,
                     symbol=symbol,
                     contract=option_contract,
-                    option_contract=option_contract,  # Support both field names
+                    
                     trade_type=trade_type,
                     action=trade_type,
                     quantity=quantity,
@@ -434,7 +453,7 @@ class LiveOptionTradeView(APIView):
                     user=request.user,
                     broker_account=getattr(adapter, 'broker_account', None),
                     option_trade=option_trade,
-                    broker_order_id=order_response.get("order_id"),
+                    broker_order_id=_order_id(order_response),
                     symbol=fyers_symbol,
                     quantity=float(quantity),
                     direction=trade_type.upper(),
@@ -494,7 +513,7 @@ class LiveOptionTradeCloseView(APIView):
         """
         try:
             trade = OptionTrade.objects.select_related(
-                "symbol", "contract", "option_contract"
+                "symbol", "contract"
             ).get(id=trade_id, user=request.user, mode="live", status="open")
         except OptionTrade.DoesNotExist:
             return Response({
@@ -505,7 +524,7 @@ class LiveOptionTradeCloseView(APIView):
         
         # Use current_price or LTP if exit_price not provided
         if exit_price is None:
-            contract = trade.contract or trade.option_contract
+            contract = trade.contract
             exit_price = float(trade.current_price or contract.ltp or trade.entry_price)
         else:
             try:
@@ -526,21 +545,21 @@ class LiveOptionTradeCloseView(APIView):
             
             # Reverse direction for exit
             exit_side = "sell" if trade.action == "buy" or trade.trade_type == "buy" else "buy"
-            contract = trade.contract or trade.option_contract
+            contract = trade.contract
             
             with transaction.atomic():
                 # Place exit order
                 exit_response = adapter.place_order(
                     symbol=contract.fyers_symbol,
-                    quantity=int(trade.quantity),
                     side=exit_side,
+                    qty=int(trade.quantity),
                     order_type="market",
-                    price=None,
-                    product_type="INTRADAY"
+                    price=0,
+                    product_type="INTRADAY",
                 )
                 
-                if not exit_response.get("success"):
-                    logger.error("Exit order failed: %s", exit_response.get("message"))
+                if not _order_success(exit_response):
+                    logger.error("Exit order failed: %s", _order_message(exit_response))
                     return Response({
                         "error": f"Exit order failed: {exit_response.get('message', 'Unknown error')}"
                     }, status=status.HTTP_400_BAD_REQUEST)
@@ -550,7 +569,7 @@ class LiveOptionTradeCloseView(APIView):
                     user=request.user,
                     broker_account=getattr(adapter, 'broker_account', None),
                     option_trade=trade,
-                    broker_order_id=exit_response.get("order_id"),
+                    broker_order_id=_order_id(exit_response),
                     symbol=contract.fyers_symbol,
                     quantity=float(trade.quantity),
                     direction=exit_side.upper(),
@@ -618,7 +637,7 @@ class PaperTradeView(APIView):
         qs = OptionTrade.objects.filter(
             user=request.user, 
             mode="paper"
-        ).select_related("symbol", "contract", "option_contract").order_by("-entry_time")
+        ).select_related("symbol", "contract").order_by("-entry_time")
         
         if status_filter != "all":
             qs = qs.filter(status=status_filter)
@@ -773,7 +792,7 @@ class PaperTradeView(APIView):
                     user=request.user,
                     symbol=symbol,
                     contract=option_contract,
-                    option_contract=option_contract,
+                    
                     trade_type=trade_type,
                     action=trade_type,
                     quantity=quantity,
@@ -879,7 +898,7 @@ class PaperAccountView(APIView):
             user=request.user, 
             mode="paper", 
             status="open"
-        ).select_related("contract", "option_contract")
+        ).select_related("contract")
 
         margin_used = sum(
             float(t.entry_price) * int(t.quantity) 
@@ -946,12 +965,12 @@ class CloseTradeView(APIView):
         
         try:
             trade = OptionTrade.objects.select_related(
-                "contract", "option_contract"
+                "contract"
             ).get(id=trade_id, user=request.user, status="open")
             
             # Determine exit price
             if exit_price is None:
-                contract = trade.contract or trade.option_contract
+                contract = trade.contract
                 exit_price = float(trade.current_price or contract.ltp or trade.entry_price)
             else:
                 exit_price = float(exit_price)
@@ -961,22 +980,22 @@ class CloseTradeView(APIView):
                 try:
                     adapter = BrokerAdapterFactory.get_adapter(request.user)
                     exit_side = "sell" if (trade.action == "buy" or trade.trade_type == "buy") else "buy"
-                    contract = trade.contract or trade.option_contract
+                    contract = trade.contract
                     
                     exit_response = adapter.place_order(
                         symbol=contract.fyers_symbol,
-                        quantity=int(trade.quantity),
                         side=exit_side,
+                        qty=int(trade.quantity),
                         order_type="market",
-                        price=None,
-                        product_type="INTRADAY"
+                        price=0,
+                        product_type="INTRADAY",
                     )
                     
-                    if exit_response.get("success"):
+                    if (exit_response.success if hasattr(exit_response, "success") else _order_success(exit_response)):
                         BrokerOrder.objects.create(
                             user=request.user,
                             option_trade=trade,
-                            broker_order_id=exit_response.get("order_id"),
+                            broker_order_id=_order_id(exit_response),
                             symbol=contract.fyers_symbol,
                             quantity=float(trade.quantity),
                             direction=exit_side.upper(),
@@ -1024,14 +1043,14 @@ class OpenTradesView(APIView):
         qs = OptionTrade.objects.filter(
             user=request.user,
             status="open"
-        ).select_related("symbol", "contract", "option_contract")
+        ).select_related("symbol", "contract")
         
         if mode != "all":
             qs = qs.filter(mode=mode)
         
         trades_data = []
         for trade in qs:
-            contract = trade.contract or trade.option_contract
+            contract = trade.contract
             if not contract:
                 continue
             
@@ -1191,7 +1210,7 @@ class OptionSnapshotView(APIView):
 def _calculate_unrealized_pnl(trade: OptionTrade) -> float:
     """Calculate unrealized PnL for a trade"""
     try:
-        contract = trade.contract or trade.option_contract
+        contract = trade.contract
         current_price = float(trade.current_price or contract.ltp or trade.entry_price)
         entry_price = float(trade.entry_price)
         quantity = int(trade.quantity)

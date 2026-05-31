@@ -230,63 +230,47 @@ app.conf.task_routes = {
 # ────────────────────────────────────────────────────────────────────
 beat_schedule = {
     # ── Live Trading ──────────────────────────────────────────────
-    "detect-live-signals": {
-        "task": "live_trading.detect_signals",
-        "schedule": schedule(15),
-        "options": {"queue": "signals", "priority": 7},
-    },
-    "expire-pending-signals": {
-        "task": "live_trading.expire_pending_signals",
-        "schedule": schedule(15),
-        "options": {"queue": "signals", "priority": 6},
+    # NOTE: detect-live-signals aur expire-semi-auto-signals
+    # settings_live_trading.py mein hain — yahan define NAHI karo (duplicate hoga)
+
+    # ── Strategy Execution ────────────────────────────────────────
+    # ✅ SINGLE SOURCE OF TRUTH: sirf yahan define hai.
+    # settings.py se hata diya — DatabaseScheduler merge pe duplicate hota tha.
+    "run-all-active-strategies": {
+        "task": "strategies.run_all_active_strategies",
+        "schedule": 60.0,
+        "options": {
+            "queue": "strategies",
+            "priority": 7,
+            "expires": 55,   # ✅ 60s cycle ke andar execute na hua toh drop karo
+        },
     },
 
     # ── Order Management ──────────────────────────────────────────
     "retry-broker-orders": {
         "task": "apps.brokers.tasks.retry_pending_orders",
         "schedule": 60.0,
-        "options": {"queue": "orders", "priority": 8},
-    },
-    "poll-broker-fills": {
-        "task": "brokers.poll_broker_order_fills",
-        "schedule": 10.0,
-        "options": {"queue": "orders", "priority": 9},
-    },
-    "sync-broker-orders": {
-        "task": "apps.orders.tasks.sync_orders",
-        "schedule": 60.0,
-        "options": {"queue": "orders", "priority": 5},
+        "options": {"queue": "orders", "priority": 8, "expires": 55},
     },
 
     # ── Market Data ───────────────────────────────────────────────
     "update-market-data": {
         "task": "apps.market.tasks.update_cached_quotes",
         "schedule": 30.0,
-        "options": {"queue": "ticks", "priority": 8},
+        "options": {"queue": "ticks", "priority": 8, "expires": 25},
     },
 
     # ════════════════════════════════════════════════════════════════
-    #  Fyers Daily Auto-Refresh Flow
-    #
-    #  ✅ CHOOSE ONE MODE:
-    #
-    #  MODE A: Master Account (Production - Recommended)
-    #  ──────────────────────────────────────────────────
-    #  - Enable: fyers-master-token-refresh
-    #  - Disable: fyers-individual-token-refresh
-    #  - .env mein: FYERS_MASTER_TOTP_SECRET required
-    #
-    #  MODE B: Individual Accounts (Dev/Testing)
-    #  ──────────────────────────────────────────
-    #  - Enable: fyers-individual-token-refresh
-    #  - Disable: fyers-master-token-refresh
-    #  - DB mein: BrokerAccount.totp_secret ya fyers_pin required
+    #  Fyers Daily Token + Feed Lifecycle
     #
     #  Timeline (IST):
     #  8:25 AM → Stop all feeds (pre-market cleanup)
-    #  8:30 AM → Token refresh + WS restart
-    #  8:45 AM → Safety net (agar 8:30 fail hua)
+    #  8:30 AM → Master token refresh + WS restart
+    #  8:45 AM → Safety net start (agar 8:30 fail hua)
     #  3:35 PM → Stop feeds (market close)
+    #
+    #  ⚠️  start_all_active_feeds Beat se sirf 8:45 AM pe chalega.
+    #  Worker start pe feed auto-start on_worker_ready se hoga.
     # ════════════════════════════════════════════════════════════════
 
     # Step 1 — 8:25 AM: Pre-market cleanup
@@ -296,30 +280,14 @@ beat_schedule = {
         "options": {"queue": "default", "priority": 5},
     },
 
-    # ┌──────────────────────────────────────────────────────────────┐
-    # │  MODE A: MASTER ACCOUNT (Production)                         │
-    # │  ✅ ENABLE THIS for centralized feed provider               │
-    # └──────────────────────────────────────────────────────────────┘
-    # Step 2A — 8:30 AM: Master account token refresh + WS restart
+    # Step 2 — 8:30 AM: Master token refresh + WS restart
     "fyers-master-token-refresh": {
         "task": "apps.brokers.tasks.auto_refresh_master_fyers_token",
         "schedule": crontab(hour=8, minute=30),
         "options": {"queue": "default", "priority": 7},
     },
 
-    # ┌──────────────────────────────────────────────────────────────┐
-    # │  MODE B: INDIVIDUAL ACCOUNTS (Dev/Testing)                   │
-    # │  ⚠️  DISABLE IN PRODUCTION if using master account          │
-    # └──────────────────────────────────────────────────────────────┘
-    # Step 2B — 8:30 AM: Individual accounts token refresh + WS restart
-    # ⚠️  Comment out this task if using master account mode above
-    # "fyers-individual-token-refresh": {
-    #     "task": "apps.brokers.tasks.auto_refresh_fyers_tokens",
-    #     "schedule": crontab(hour=8, minute=30),
-    #     "options": {"queue": "default", "priority": 6},
-    # },
-
-    # Step 3 — 8:45 AM: Safety net (agar token refresh fail hua)
+    # Step 3 — 8:45 AM: Safety net (agar 8:30 fail hua)
     "fyers-market-open-ws-start": {
         "task": "apps.brokers.tasks.start_all_active_feeds",
         "schedule": crontab(hour=8, minute=45),
@@ -423,9 +391,12 @@ app.autodiscover_tasks([
 #  Windows fix
 # ────────────────────────────────────────────────────────────────────
 if sys.platform == "win32":
-    app.conf.worker_pool = "solo"
-    app.conf.worker_concurrency = 1
-    logger.warning("Running on Windows — using solo pool")
+    # ✅ FIX: solo pool ki jagah threads use karo
+    # solo = sirf 1 task ek waqt mein → rate limit + busy errors
+    # threads = multiple concurrent tasks → sab symbols saath chalte hain
+    app.conf.worker_pool = "threads"
+    app.conf.worker_concurrency = 10
+    logger.warning("Running on Windows — using threads pool (concurrency=10)")
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -517,7 +488,15 @@ def on_task_retry(
 
 @worker_ready.connect
 def on_worker_ready(sender=None, **kwargs):
-    """Worker startup hook."""
+    """
+    Worker startup hook.
+
+    ✅ FIX: Worker start pe feeds ek baar start karo — Redis lock se.
+    Pehle koi guard nahi tha — har thread/restart pe duplicate feeds shuru ho
+    jaate the (log mein 18 baar "Feed started" dikh raha tha).
+
+    run_all_active_strategies yahan SE NAHI chalti — Beat ka kaam hai.
+    """
     logger.info("🚀 Celery worker ready — %s", sender)
     if hasattr(sender, "controller"):
         pool = sender.controller.pool
@@ -526,6 +505,50 @@ def on_worker_ready(sender=None, **kwargs):
             pool.limit if pool else "unknown",
             sender.pool_cls,
         )
+
+    # ── Feed startup — ek baar, Redis lock ke saath ─────────────────────────
+    # Lock TTL = 30s: agar multiple workers ek saath start ho rahe hain toh
+    # sirf pehla worker feeds start karega, baaki skip kar denge.
+    try:
+        from django.core.cache import cache
+        lock_key = "worker_ready:feeds_started"
+
+        # add() = set only if NOT exists — atomic Redis operation
+        acquired = cache.add(lock_key, True, timeout=30)
+        if not acquired:
+            logger.info(
+                "on_worker_ready: feed startup skipped — another worker already starting feeds"
+            )
+            return
+
+        # Market hours ke baahir feed connect karne ki zaroorat nahi
+        import datetime
+        from django.utils import timezone as tz
+        now_ist = tz.localtime(
+            tz.now(),
+            datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+        )
+        is_weekday   = now_ist.weekday() < 5
+        market_open  = now_ist.replace(hour=9,  minute=10, second=0, microsecond=0)
+        market_close = now_ist.replace(hour=15, minute=35, second=0, microsecond=0)
+
+        if not (is_weekday and market_open <= now_ist <= market_close):
+            logger.info(
+                "on_worker_ready: market closed (%s) — feeds NOT started on boot",
+                now_ist.strftime("%a %H:%M IST"),
+            )
+            return
+
+        from apps.brokers.tasks import start_all_active_feeds
+        start_all_active_feeds.apply_async(
+            queue="default",
+            priority=5,
+            countdown=3,   # 3s delay — Django ORM ready hone ke baad
+        )
+        logger.info("on_worker_ready: feed startup task queued")
+
+    except Exception as exc:
+        logger.error("on_worker_ready: feed startup error | %s", exc)
 
 
 @worker_shutdown.connect

@@ -22,6 +22,29 @@ logger = logging.getLogger(__name__)
 
 
 def route_and_place_order(strategy, signal) -> Optional[object]:
+    # ── Market hours guard (NSE: 9:15–15:30 IST) ──
+    # Crypto (Delta) always open; skip check for paper mode too
+    # ✅ FIX: broker se is_crypto check nahi — paper mode mein broker=None hota hai.
+    # Symbol se detect karo (BTC/ETH/USDT) ya broker slug se (jab live ho).
+    broker_slug = getattr(strategy.broker, "broker", "") if strategy.broker else ""
+    _sym_upper = str(getattr(signal, "symbol", "") or "").upper()
+    _CRYPTO_KW = {"BTC", "ETH", "SOL", "BNB", "XRP", "ADA", "USDT"}
+    is_crypto = broker_slug == "delta" or any(kw in _sym_upper for kw in _CRYPTO_KW)
+    if not is_crypto and strategy.mode != "paper":
+        from apps.strategies.services import _is_market_time
+        if not _is_market_time():
+            logger.warning(
+                "Market closed — order blocked | strategy=%s | symbol=%s",
+                strategy.id, signal.symbol,
+            )
+            return None
+
+    # ── ✅ GLOBAL STRATEGY: har subscriber ke broker se order place karo ──
+    # is_global=True strategy sirf creator (Satish) ke broker se nahi chalegee —
+    # balki har eligible subscriber (Chanchal etc.) ke apne broker se order jayega.
+    if strategy.is_global:
+        return _route_global_strategy(strategy, signal)
+
     if strategy.mode == "paper":
         logger.info(
             "Paper mode detected | strategy=%s | instrument=%s",
@@ -48,13 +71,40 @@ def route_and_place_order(strategy, signal) -> Optional[object]:
     )
 
     try:
-        if broker_slug == "fyers":
-            return _place_fyers_order(strategy, signal, instrument_type)
-        elif broker_slug == "delta":
-            return _place_delta_order(strategy, signal, instrument_type)
-        else:
-            logger.error("Unknown broker slug: %s", broker_slug)
+        # ✅ SCALABLE: BROKER_ORDER_FUNCTIONS registry use karo
+        # Naya broker: wahan add karo, yahan kuch nahi badalna
+        fn_name = BROKER_ORDER_FUNCTIONS.get(broker_slug)
+        if fn_name is None:
+            logger.error(
+                "route_and_place_order: broker=%s ke liye function nahi | "
+                "BROKER_ORDER_FUNCTIONS mein add karo",
+                broker_slug,
+            )
             return None
+
+        fn = globals().get(fn_name)
+        if fn is None:
+            logger.error("route_and_place_order: function %s not found", fn_name)
+            return None
+
+        # ✅ SECURITY: user ka APNA account — strategy.broker (admin ka) nahi
+        user_account = _pick_best_account_for_user(strategy.user, instrument_type)
+        if not user_account:
+            logger.warning(
+                "⛔ route_and_place_order: user=%s ke paas %s ke liye koi broker nahi",
+                strategy.user.pk, instrument_type,
+            )
+            return None
+
+        if user_account.user_id != strategy.user.pk:
+            logger.critical(
+                "🚨 SECURITY: account %s belongs to user %s but strategy.user=%s — BLOCKING",
+                user_account.id, user_account.user_id, strategy.user.pk,
+            )
+            return None
+
+        return fn(strategy, signal, instrument_type,
+                  user=strategy.user, account=user_account)
 
     except Exception as exc:
         logger.exception(
@@ -67,82 +117,772 @@ def route_and_place_order(strategy, signal) -> Optional[object]:
 
 
 # ─────────────────────────────────────────────────────────────────
+#  GLOBAL STRATEGY ROUTING
+#  Global strategy ke liye har eligible subscriber ke broker se
+#  alag-alag order place karo.
+# ─────────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────
+#  BROKER CAPABILITY MAP
+#  Scalable broker registry — naya broker add karo toh sirf yahan daalo.
+#  instrument_type → us instrument ko support karne wale brokers ki list
+# ─────────────────────────────────────────────────────────────────
+
+BROKER_CAPABILITIES: dict[str, list[str]] = {
+    # Indian market instruments — priority order (first = preferred)
+    # Dhan first: fresh token, reliable API
+    # Zerodha second: stable OAuth, widely used
+    # Fyers third: auto-refresh support
+    "options":  ["dhan", "zerodha", "fyers", "upstox", "angel"],
+    "futures":  ["dhan", "zerodha", "fyers", "upstox", "angel"],
+    "equity":   ["dhan", "zerodha", "fyers", "upstox", "angel"],
+    # Crypto instruments
+    "perp":     ["delta", "binance", "bybit", "okx"],
+    "crypto":   ["delta", "binance", "bybit", "okx"],
+}
+
+# Broker → order placement function mapping
+# Naya broker add karna ho: function likhkar yahan register karo
+# Zerodha ka dedicated _place_zerodha_order function hai (KiteConnect adapter)
+BROKER_ORDER_FUNCTIONS: dict[str, str] = {
+    "fyers":   "_place_fyers_order",
+    "delta":   "_place_delta_order",
+    "dhan":    "_place_dhan_order",
+    "zerodha": "_place_zerodha_order",   # ✅ dedicated function
+    "upstox":  "_place_fyers_order",     # placeholder until dedicated fn
+}
+
+
+def _get_eligible_brokers_for_instrument(instrument_type: str) -> list[str]:
+    """
+    Instrument type ke liye eligible broker slugs return karo.
+    Unknown instrument → empty list (order block).
+    """
+    return BROKER_CAPABILITIES.get(instrument_type.lower(), [])
+
+
+def _pick_best_account_for_user(
+    user, instrument_type: str, exclude_user_ids: set = None
+):
+    """
+    User ka sabse best BrokerAccount dhundo jo is instrument ko support karta ho.
+
+    Priority: BROKER_CAPABILITIES list ka order (first = preferred).
+    e.g. options → fyers pehle, phir dhan, phir zerodha...
+
+    Returns: BrokerAccount ya None
+    """
+    from apps.brokers.models import BrokerAccount
+
+    eligible_slugs = _get_eligible_brokers_for_instrument(instrument_type)
+    if not eligible_slugs:
+        logger.warning(
+            "_pick_best_account_for_user: no brokers support instrument=%s",
+            instrument_type,
+        )
+        return None
+
+    # Sab eligible accounts ek query mein lo
+    accounts = (
+        BrokerAccount.objects
+        .filter(
+            user=user,
+            broker__in=eligible_slugs,
+            is_active=True,
+            is_verified=True,
+        )
+        .exclude(
+            # Dhan: dhan_access_token empty hone pe bhi filter karo
+        )
+        .select_related("user")
+        .order_by("-updated_at")
+    )
+
+    # Filter: dhan ke liye dhan_access_token check karo
+    valid_accounts = []
+    for acc in accounts:
+        if acc.broker == "dhan":
+            if not getattr(acc, "dhan_access_token", ""):
+                continue
+        else:
+            if not getattr(acc, "access_token", ""):
+                continue
+        valid_accounts.append(acc)
+
+    if not valid_accounts:
+        return None
+
+    # Priority order se sort karo
+    slug_priority = {slug: i for i, slug in enumerate(eligible_slugs)}
+    valid_accounts.sort(key=lambda a: slug_priority.get(a.broker, 999))
+    return valid_accounts[0]
+
+
+def _route_global_strategy(strategy, signal):
+    """
+    ✅ SCALABLE MULTI-BROKER ROUTING
+    Admin strategy set karta hai (instrument_type) → har user apne broker se trade karta hai.
+
+    Design:
+    - Strategy mein sirf instrument_type matter karta hai (options/futures/equity/perp)
+    - Admin ka broker (strategy.broker) sirf reference ke liye — users par enforce nahi
+    - Har user ka apna best connected broker auto-pick hota hai (BROKER_CAPABILITIES se)
+    - Naya broker add: BROKER_CAPABILITIES + BROKER_ORDER_FUNCTIONS mein daalo, bas
+
+    9:15 pe 100 users:
+    - User A (Dhan) → DhanAdapter.place_order()
+    - User B (Fyers) → FyersAdapter.place_order()
+    - User C (Zerodha) → ZerodhaAdapter.place_order()
+    - Sab parallel, kisi ka bhi token kisi aur pe affect nahi karta
+
+    Returns: First placed order (ya None agar koi nahi hua)
+    """
+    from apps.brokers.models import BrokerAccount
+    from apps.strategies.models import UserStrategyPreference
+
+    instrument_type = strategy.instrument_type
+    creator_id = strategy.user.pk if strategy.user else None
+    placed_orders = []
+
+    # ── Step 1: Is strategy ko kaun chala raha hai ────────────────
+    running_user_ids = list(
+        UserStrategyPreference.objects.filter(
+            strategy=strategy,
+            is_running=True,
+        )
+        .exclude(user_id=creator_id)          # creator ko exclude karo
+        .values_list("user_id", flat=True)
+    )
+
+    if not running_user_ids:
+        logger.info(
+            "Global strategy: koi subscriber nahi chala raha | strategy=%s",
+            strategy.id,
+        )
+        return None
+
+    # ── Step 2: Eligible broker slugs for this instrument ─────────
+    eligible_slugs = _get_eligible_brokers_for_instrument(instrument_type)
+    if not eligible_slugs:
+        logger.error(
+            "Global strategy: instrument_type=%s ke liye koi broker support nahi | "
+            "strategy=%s",
+            instrument_type, strategy.id,
+        )
+        return None
+
+    # ── Step 3: Sabhi running users ke best accounts ─────────────
+    # Ek query mein sab accounts lo, phir Python mein user-wise group karo
+    all_accounts = (
+        BrokerAccount.objects
+        .filter(
+            broker__in=eligible_slugs,
+            is_active=True,
+            is_verified=True,
+            user_id__in=running_user_ids,
+        )
+        .select_related("user")
+        .order_by("user_id", "-updated_at")
+    )
+
+    # User-wise best account pick karo (priority order se)
+    slug_priority = {slug: i for i, slug in enumerate(eligible_slugs)}
+    user_best_account: dict = {}
+    for acc in all_accounts:
+        # Token validity check
+        if acc.broker == "dhan":
+            if not getattr(acc, "dhan_access_token", ""):
+                continue
+        else:
+            if not getattr(acc, "access_token", ""):
+                continue
+
+        uid = acc.user_id
+        if uid not in user_best_account:
+            user_best_account[uid] = acc
+        else:
+            # Lower priority number = better broker
+            existing_priority = slug_priority.get(user_best_account[uid].broker, 999)
+            new_priority = slug_priority.get(acc.broker, 999)
+            if new_priority < existing_priority:
+                user_best_account[uid] = acc
+
+    # allowed_plans filter
+    if strategy.allowed_plans:
+        allowed_lower = {p.lower() for p in strategy.allowed_plans}
+        user_best_account = {
+            uid: acc for uid, acc in user_best_account.items()
+            if getattr(acc.user, "plan", "free").lower() in allowed_lower
+        }
+
+    logger.info(
+        "Global strategy routing | strategy=%s | instrument=%s | "
+        "running_users=%d | eligible_with_broker=%d | "
+        "eligible_slugs=%s | signal=%s",
+        strategy.id, instrument_type,
+        len(running_user_ids), len(user_best_account),
+        eligible_slugs, signal.signal_type,
+    )
+
+    # ── Step 4: Har user ke liye order place karo ─────────────────
+    for user_id, account in user_best_account.items():
+        subscriber = account.user
+        try:
+            order = _place_order_for_subscriber(
+                strategy=strategy,
+                signal=signal,
+                user=subscriber,
+                instrument_type=instrument_type,
+                placed_orders=placed_orders,
+                preloaded_account=account,
+            )
+            if order:
+                logger.info(
+                    "✅ Order placed | user=%s | broker=%s | strategy=%s",
+                    subscriber.pk, account.broker, strategy.id,
+                )
+        except Exception as exc:
+            logger.exception(
+                "Global strategy order failed | strategy=%s | user=%s | broker=%s | %s",
+                strategy.id, subscriber.pk, account.broker, exc,
+            )
+
+    logger.info(
+        "Global strategy done | strategy=%s | orders_placed=%d / %d users",
+        strategy.id, len(placed_orders), len(user_best_account),
+    )
+    return placed_orders[0] if placed_orders else None
+
+
+def _place_order_for_subscriber(
+    strategy, signal, user, instrument_type, placed_orders: list,
+    preloaded_account=None,
+):
+    """
+    ✅ SCALABLE: Ek subscriber user ke liye order place karo.
+
+    preloaded_account: _route_global_strategy se pehle se fetched BrokerAccount.
+    Agar None → user ka best available broker auto-pick karo (BROKER_CAPABILITIES se).
+    """
+    # ── Broker account: preloaded ya best-pick ────────────────────
+    if preloaded_account is not None:
+        account = preloaded_account
+    else:
+        account = _pick_best_account_for_user(user, instrument_type)
+
+    # ── Live mode: broker account se order ───────────────────────
+    if account:
+        broker_slug = account.broker
+        logger.info(
+            "Global strategy | user=%s | broker=%s | placing LIVE order | instrument=%s",
+            user.pk, broker_slug, instrument_type,
+        )
+        order = _place_order_via_broker(
+            strategy=strategy,
+            signal=signal,
+            user=user,
+            account=account,
+            broker_slug=broker_slug,
+            instrument_type=instrument_type,
+        )
+        if order:
+            placed_orders.append(order)
+            logger.info(
+                "✅ Order placed | user=%s | broker=%s | order=%s",
+                user.pk, broker_slug, order.id,
+            )
+        else:
+            logger.warning(
+                "Order nahi hua | user=%s | broker=%s", user.pk, broker_slug
+            )
+    else:
+        # Koi bhi eligible broker connected nahi → paper trade
+        logger.info(
+            "Global strategy | user=%s | no eligible broker for %s → paper trade",
+            user.pk, instrument_type,
+        )
+        paper_order = _place_paper_trade_for_user(strategy, signal, user)
+        if paper_order:
+            placed_orders.append(paper_order)
+
+
+def _make_strategy_proxy(strategy, user):
+    """
+    Strategy object wrap karo taaki strategy.user = subscriber ho.
+    Yeh important hai kyunki create_order() strategy.user se user uthata hai.
+    Global strategy ke signals creator ke naam pe nahi, subscriber ke naam pe record honge.
+    """
+    class _StrategyProxy:
+        def __init__(self, real_strategy, override_user):
+            self._real = real_strategy
+            self.user = override_user
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+    return _StrategyProxy(strategy, user)
+
+
+def _place_order_via_broker(strategy, signal, user, account, broker_slug: str, instrument_type: str):
+    """
+    ✅ SCALABLE: Subscriber ke broker account se actual order place karo.
+    BROKER_ORDER_FUNCTIONS registry se correct placement function call karo.
+    Naya broker: BROKER_ORDER_FUNCTIONS mein add karo, function likho, done.
+
+    strategy.user ko subscriber user se replace karo (proxy) taaki
+    order subscriber ke naam pe record ho, creator (admin) ke naam pe nahi.
+    """
+    proxy = _make_strategy_proxy(strategy, user)
+
+    # ── Registry se function dhundo ───────────────────────────────
+    fn_name = BROKER_ORDER_FUNCTIONS.get(broker_slug)
+    if fn_name is None:
+        logger.error(
+            "_place_order_via_broker: broker=%s ke liye koi function registered nahi | "
+            "BROKER_ORDER_FUNCTIONS mein add karo",
+            broker_slug,
+        )
+        return None
+
+    fn = globals().get(fn_name)
+    if fn is None:
+        logger.error(
+            "_place_order_via_broker: function %s not found in signal_router.py | "
+            "define karo",
+            fn_name,
+        )
+        return None
+
+    logger.info(
+        "_place_order_via_broker | user=%s | broker=%s | fn=%s | instrument=%s",
+        user.pk, broker_slug, fn_name, instrument_type,
+    )
+    return fn(proxy, signal, instrument_type, user=user, account=account)
+
+
+def _place_paper_trade_for_user(strategy, signal, user):
+    """Subscriber ke liye paper trade create karo."""
+    proxy = _make_strategy_proxy(strategy, user)
+    try:
+        return _place_paper_trade(proxy, signal)
+    except Exception as e:
+        logger.error("Paper trade failed | user=%s | %s", user.pk, e)
+        return None
+
+
+# ─────────────────────────────────────────────────────────────────
 #  FYERS ORDER PLACEMENT
 # ─────────────────────────────────────────────────────────────────
 
 
-def _place_fyers_order(strategy, signal, instrument_type: str):
+def _refresh_fyers_token_sync(account) -> bool:
+    """
+    Token expired hone par programmatic login se fresh access_token lo.
+    Returns True agar refresh successful, False otherwise.
+
+    Sirf kaam karta hai jab:
+    - account.fyers_client_id set ho
+    - account.totp_secret ya account.fyers_pin set ho
+
+    User ne sirf OAuth (manual) login kiya tha → credentials nahi hain → False return.
+    Is case mein user ko app se reconnect karna hoga.
+    """
+    from django.conf import settings as _settings
+
+    fyers_client_id = getattr(account, "fyers_client_id", "") or ""
+    totp_secret     = getattr(account, "totp_secret", "") or ""
+    fyers_pin       = getattr(account, "fyers_pin", "") or ""
+
+    if not fyers_client_id:
+        logger.warning(
+            "_refresh_fyers_token_sync: fyers_client_id missing | account=%s — "
+            "user needs to reconnect via app (Settings > Broker > Fyers)",
+            account.id,
+        )
+        return False
+
+    if not totp_secret and not fyers_pin:
+        logger.warning(
+            "_refresh_fyers_token_sync: No auth credentials (totp/pin) | account=%s — "
+            "user needs to save TOTP/PIN in app",
+            account.id,
+        )
+        return False
+
+    try:
+        from apps.brokers.views import _fyers_programmatic_login
+        import hashlib, requests as _requests
+
+        app_id      = account.app_id       or getattr(_settings, "FYERS_APP_ID", "")
+        secret_key  = account.secret_key   or getattr(_settings, "FYERS_SECRET_KEY", "")
+        redirect_uri = getattr(_settings, "FYERS_REDIRECT_URI", "")
+
+        if not app_id or not secret_key:
+            logger.error("_refresh_fyers_token_sync: app_id/secret missing | account=%s", account.id)
+            return False
+
+        result = _fyers_programmatic_login(
+            app_id=app_id,
+            secret_key=secret_key,
+            redirect_uri=redirect_uri,
+            fyers_client_id=fyers_client_id,
+            totp_secret=totp_secret,
+            fyers_pin=fyers_pin,
+            state=str(account.user_id),
+        )
+
+        if not result.get("success"):
+            logger.error(
+                "_refresh_fyers_token_sync: login failed | account=%s | err=%s",
+                account.id, result.get("error"),
+            )
+            return False
+
+        auth_code   = result["auth_code"]
+        FYERS_AUTH  = "https://api-t1.fyers.in/api/v3"
+        app_id_hash = hashlib.sha256(f"{app_id}:{secret_key}".encode()).hexdigest()
+
+        resp = _requests.post(
+            f"{FYERS_AUTH}/validate-authcode",
+            json={"grant_type": "authorization_code", "appIdHash": app_id_hash, "code": auth_code},
+            timeout=(5, 15),
+        )
+        data = resp.json()
+        new_token = data.get("access_token", "")
+
+        if not new_token:
+            logger.error(
+                "_refresh_fyers_token_sync: no access_token in response | account=%s | resp=%s",
+                account.id, data,
+            )
+            return False
+
+        # Save new token
+        from django.utils import timezone as _tz
+        import datetime
+        account.access_token  = new_token
+        account.is_verified   = True
+        account.is_active     = True
+        account.token_expiry  = _tz.now() + datetime.timedelta(hours=23)
+        account.save(update_fields=["access_token", "is_verified", "is_active", "token_expiry"])
+
+        logger.info(
+            "✅ _refresh_fyers_token_sync: token refreshed | account=%s | user=%s",
+            account.id, account.user_id,
+        )
+        return True
+
+    except Exception as e:
+        logger.exception(
+            "_refresh_fyers_token_sync: exception | account=%s | %s",
+            account.id, e,
+        )
+        return False
+
+
+def _place_fyers_order(strategy, signal, instrument_type: str, user=None, account=None):
     """
     Fyers pe order place karo.
     instrument_type:
       - 'options' → CALL/PUT option buy karo
       - 'futures' → F&O future contract
       - 'equity'  → equity (cash) segment
+
+    user, account: Global strategy routing ke liye subscriber ka user/account pass karo.
+    Normal strategy mein None rahega — strategy.user se fetch hoga.
     """
     from fyers_apiv3 import fyersModel
 
     from apps.brokers.models import BrokerAccount
     from apps.orders.services import create_order
 
-    # Broker credentials fetch karo
-    account = (
-        BrokerAccount.objects.filter(
-            user=strategy.user,
-            broker="fyers",
-            is_active=True,
-            is_verified=True,
-        )
-        .select_related()
-        .first()
-    )
+    # ── Effective user determine karo ─────────────────────────────
+    # Global strategy ke liye subscriber ka user pass hota hai.
+    # Normal strategy ke liye strategy.user use karo.
+    effective_user = user or strategy.user
 
-    if not account:
-        logger.error("Fyers account not connected for user %s", strategy.user.pk)
+    # ── ✅ RISK CHECK: RiskManager se pre-trade validation ─────────
+    # Yahan check karo PEHLE broker account dhundhe —
+    # agar risk limits cross ho gayi hain toh Fyers pe order mat bhejo.
+    try:
+        from apps.risk.manager import RiskManager
+        rm = RiskManager(effective_user)
+        allowed, reason = rm.can_place_order(
+            symbol=signal.symbol,
+            qty=1,  # qty abhi malum nahi, basic check ke liye 1 use karo
+            price=float(signal.price),
+        )
+        if not allowed:
+            logger.warning(
+                "❌ Risk check FAILED — order blocked | user=%s | strategy=%s | "
+                "symbol=%s | reason=%s",
+                effective_user.pk, strategy.id, signal.symbol, reason,
+            )
+            # ── Rejected order DB mein save karo ─────────────────
+            _save_rejected_broker_order(
+                strategy=strategy,
+                signal=signal,
+                user=effective_user,
+                account=account,
+                reason=f"Risk check failed: {reason}",
+            )
+            return None
+    except Exception as risk_err:
+        # RiskManager fail hone pe order BLOCK karo (fail-safe)
+        logger.error(
+            "RiskManager check error | user=%s | err=%s — order BLOCKED",
+            effective_user.pk, risk_err,
+        )
         return None
 
+    # ── Broker credentials fetch karo ─────────────────────────────
+    # Agar account pehle se pass kiya gaya (global routing) toh use karo.
+    # Warna effective_user ka fyers account dhundho.
+    if account is None:
+        account = (
+            BrokerAccount.objects.filter(
+                user=effective_user,
+                broker="fyers",
+                is_active=True,
+                is_verified=True,
+            )
+            .select_related()
+            .first()
+        )
+
+    if not account:
+        logger.error("Fyers account not connected for user %s", effective_user.pk)
+        return None
+
+    # ── ✅ FIX: Token validity check BEFORE order ─────────────────
+    # Agar access_token missing/expired hai → auto-refresh try karo
+    # (tabhi jab fyers_client_id + totp_secret/pin stored hai)
+    if not account.access_token:
+        logger.error(
+            "Fyers access_token missing | user=%s | account=%s — reconnect needed",
+            effective_user.pk, account.id,
+        )
+        return None
+
+    # Token stored hai — expiry check karo (token_expiry field agar hai)
+    token_expiry = getattr(account, "token_expiry", None)
+    if token_expiry:
+        from django.utils import timezone as tz
+        if tz.now() >= token_expiry:
+            logger.warning(
+                "Fyers token expired | user=%s | account=%s | expiry=%s — "
+                "auto-refresh try karo",
+                effective_user.pk, account.id, token_expiry,
+            )
+            # Auto-refresh try karo agar credentials available hain
+            _refresh_fyers_token_sync(account)
+            # Reload account from DB
+            account.refresh_from_db()
+            if not account.access_token:
+                logger.error(
+                    "Token refresh failed | user=%s | account=%s",
+                    effective_user.pk, account.id,
+                )
+                return None
+
     # Fyers client initialize
+    # SDK internally: header = f"{client_id}:{token}"
+    # Isliye:
+    #   client_id = app_id        (e.g. "RBPEXX0S3A-200")
+    #   token     = access_token  (sirf JWT token — app_id prefix NAHI)
+    # Dono ko alag pass karo — SDK khud combine karta hai.
+    effective_app_id = account.app_id or settings.FYERS_APP_ID
     fyers = fyersModel.FyersModel(
-        client_id=settings.FYERS_APP_ID,
+        client_id=effective_app_id,
         token=account.access_token,
         log_path="",
         is_async=False,
     )
+    logger.info(
+        "Fyers client initialized | user=%s | app_id=%s | account=%s",
+        effective_user.pk, effective_app_id, account.id,
+    )
 
     # Risk params
     risk = strategy.risk_config
+    # qty Flutter se aata hai — code multiply nahi karega
     qty = int(risk.get("qty", 1))
 
-    if instrument_type == "options":
-        return _fyers_options_order(strategy, signal, fyers, account, qty, risk)
-    elif instrument_type == "futures":
-        return _fyers_futures_order(strategy, signal, fyers, account, qty, risk)
+    if instrument_type == "futures":
+        logger.info("Futures order | qty=%d (Flutter se)", qty)
+        return _fyers_futures_order(strategy, signal, fyers, account, qty, risk, effective_user=effective_user)
+    elif instrument_type == "options":
+        # Options: available capital × risk_pct se qty calculate karo
+        qty = _calculate_options_qty(strategy, signal, fyers, risk)
+        if not qty or qty < 1:
+            logger.error("Options qty 0 hua | symbol=%s | capital insufficient", signal.symbol)
+            return None
+        logger.info("Options order | qty=%d (capital-based)", qty)
+        return _fyers_options_order(strategy, signal, fyers, account, qty, risk, effective_user=effective_user)
     elif instrument_type == "equity":
-        return _fyers_equity_order(strategy, signal, fyers, account, qty, risk)
+        return _fyers_equity_order(strategy, signal, fyers, account, qty, risk, effective_user=effective_user)
     else:
         logger.error("Unknown instrument_type for Fyers: %s", instrument_type)
         return None
 
 
-def _fyers_options_order(strategy, signal, fyers, account, qty: int, risk: dict):
+def _calculate_options_qty(strategy, signal, fyers, risk: dict) -> int:
+    """
+    Capital percentage se options qty calculate karo.
+
+    Logic:
+    1. Fyers se available funds lo
+    2. risk_config ka capital_pct use karo (default 50%)
+    3. Trade capital = available × capital_pct / 100
+    4. Option ka LTP fetch karo (ya signal price use karo)
+    5. qty = floor(trade_capital / (option_ltp × lot_size))
+    6. Minimum 1 lot return karo
+
+    risk_config fields:
+        capital_pct  : kitna % capital use karna hai (default 50)
+        max_lots     : maximum lots cap (default 10)
+    """
+    from .fyers_utils import _clean_symbol, STRIKE_STEPS
+
+    LOT_SIZES_OPTIONS = {
+        "NIFTY":      65,
+        "BANKNIFTY":  30,
+        "FINNIFTY":   60,
+        "MIDCPNIFTY": 120,
+        "SENSEX":     10,
+    }
+
+    try:
+        # ── 1. Available capital Fyers se lo ─────────────────────
+        funds_resp = fyers.funds()
+        available = 0.0
+        if funds_resp and funds_resp.get("s") == "ok":
+            fund_list = funds_resp.get("fund_limit", [])
+            # ✅ FIX: Fyers v3 API mein multiple possible field names hain
+            # Title variants: "Available Balance", "Avl. Balance", "Net Balance"
+            # Amount field variants: "equityAmount", "amount", "balance"
+            BALANCE_TITLES = {
+                "Available Balance", "Avl. Balance", "Available Margin",
+                "Total Balance", "Net Balance", "Avl. Margin",
+            }
+            for item in fund_list:
+                if item.get("title") in BALANCE_TITLES:
+                    # Try all possible amount fields
+                    amt = (
+                        item.get("equityAmount")
+                        or item.get("amount")
+                        or item.get("balance")
+                        or 0
+                    )
+                    try:
+                        available = float(amt)
+                    except (TypeError, ValueError):
+                        available = 0.0
+                    if available > 0:
+                        break
+            
+            # Last resort: sum all positive equityAmount values
+            if available <= 0:
+                for item in fund_list:
+                    try:
+                        amt = float(item.get("equityAmount") or item.get("amount") or 0)
+                        if amt > 0:
+                            available = amt
+                            break
+                    except (TypeError, ValueError):
+                        continue
+        
+        if available <= 0:
+            # ✅ NOTE: Negative balance = account mein funds nahi hain
+            # qty=1 fallback — order attempt hoga, broker reject karega agar insufficient funds
+            logger.warning(
+                "Fyers funds fetch failed ya 0/negative — qty=1 fallback | available=%.2f",
+                available,
+            )
+            return 1
+
+        logger.info("Available capital: ₹%.2f", available)
+
+        # ── 2. Capital percentage ─────────────────────────────────
+        capital_pct = float(risk.get("capital_pct", 50))  # default 50%
+        max_lots    = int(risk.get("max_lots", 10))
+        trade_capital = available * capital_pct / 100
+        logger.info("Trade capital: ₹%.2f (%.0f%% of ₹%.2f)", trade_capital, capital_pct, available)
+
+        # ── 3. Symbol clean karo ─────────────────────────────────
+        base = _clean_symbol(signal.symbol)
+        lot_size = LOT_SIZES_OPTIONS.get(base, 65)
+
+        # ── 4. Option premium estimate ────────────────────────────
+        # Signal price = underlying price, option LTP alag hota hai
+        # Estimate: ATM option ~ 0.4-0.5% of underlying (rough)
+        # Real scenario mein Fyers quote API se milega
+        underlying_price = float(signal.price)
+        estimated_premium = round(underlying_price * 0.004, 2)  # ~0.4%
+        estimated_premium = max(estimated_premium, 10.0)  # minimum 10 rs
+
+        # ── 5. Qty calculate karo ────────────────────────────────
+        cost_per_lot = estimated_premium * lot_size
+        if cost_per_lot <= 0:
+            return 1
+
+        lots = int(trade_capital / cost_per_lot)
+        lots = max(1, min(lots, max_lots))  # 1 se max_lots ke beech
+
+        logger.info(
+            "Options qty calc | capital=₹%.0f | premium~₹%.1f | lot_size=%d | "
+            "cost_per_lot=₹%.0f | lots=%d",
+            trade_capital, estimated_premium, lot_size, cost_per_lot, lots,
+        )
+        return lots
+
+    except Exception as e:
+        logger.error("_calculate_options_qty error: %s — fallback qty=1", e)
+        return 1
+
+
+def _fyers_options_order(strategy, signal, fyers, account, qty: int, risk: dict, effective_user=None):
     """Fyers options order — CALL (buy) ya PUT (buy)"""
     from apps.orders.services import create_order
 
-    from .fyers_utils import get_atm_option_symbol  # helper — neeche define kiya
+    from .fyers_utils import get_atm_option_symbol, LOT_SIZES, _clean_symbol
 
     symbol = signal.symbol  # e.g. 'NIFTY'
     signal_type = signal.signal_type  # 'buy' ya 'sell'
     current_price = float(signal.price)
 
+    # ✅ FIX: Crypto symbols ke liye Fyers options exist nahi karte
+    # ETH-USDT, BTC-USDT → NSE:ETH-USDT26MAY212150PE jaisa galat symbol banta tha
+    from .fyers_utils import _clean_symbol as _cs
+    _base_check = _cs(symbol)
+    _CRYPTO_CHECK = {"BTC-USDT", "ETH-USDT", "BNB-USDT", "XRP-USDT", "SOL-USDT", "BTCUSD", "ETHUSD"}
+    if _base_check in _CRYPTO_CHECK or "-USDT" in _base_check or "-USD" in _base_check:
+        logger.warning(
+            "Crypto symbol ke liye Fyers options nahi hote — order skip | symbol=%s", symbol
+        )
+        return None
+
     # ATM option symbol nikalo
     # buy signal → CALL, sell signal → PUT
     option_type = "CE" if signal_type == "buy" else "PE"
-    option_symbol = get_atm_option_symbol(symbol, current_price, option_type)
+    # ✅ FIX: user pass karo — option chain se real Fyers symbol milega
+    _order_user = effective_user or strategy.user
+    option_symbol = get_atm_option_symbol(symbol, current_price, option_type, user=_order_user)
 
     if not option_symbol:
         logger.error(
             "ATM option symbol nahi mila | symbol=%s | price=%s", symbol, current_price
         )
         return None
+
+    # ── FIX: qty = lots (Flutter se / capital-based), actual_qty = lots × lot_size ──
+    base = _clean_symbol(symbol)
+    lot_size = LOT_SIZES.get(base, 1)
+    actual_qty = qty * lot_size
+    logger.info(
+        "Options qty | lots=%d | lot_size=%d | actual_qty=%d | symbol=%s",
+        qty, lot_size, actual_qty, base,
+    )
 
     # SL/target calculate karo
     sl_pct = float(risk.get("sl_pct", 0.5))
@@ -151,10 +891,11 @@ def _fyers_options_order(strategy, signal, fyers, account, qty: int, risk: dict)
     tgt_price = round(current_price * (1 + target_pct / 100), 2)
 
     logger.info(
-        "Fyers OPTIONS order | symbol=%s | type=%s | qty=%d | price=%s | sl=%s | tgt=%s",
+        "Fyers OPTIONS order | symbol=%s | type=%s | lots=%d | qty=%d | price=%s | sl=%s | tgt=%s",
         option_symbol,
         option_type,
         qty,
+        actual_qty,
         current_price,
         sl_price,
         tgt_price,
@@ -163,8 +904,8 @@ def _fyers_options_order(strategy, signal, fyers, account, qty: int, risk: dict)
     # Fyers order data
     order_data = {
         "symbol": option_symbol,
-        "qty": qty,
-        "type": 2,  # Market order
+        "qty": actual_qty,
+        "type": 2,  # Fyers v3: 2=Market order (1=Limit, 2=Market, 3=SL, 4=SL-M)
         "side": 1,  # 1=buy (always buy options)
         "productType": "INTRADAY",
         "limitPrice": 0,
@@ -182,32 +923,41 @@ def _fyers_options_order(strategy, signal, fyers, account, qty: int, risk: dict)
             strategy=strategy,
             symbol=option_symbol,
             side="buy",
-            quantity=qty,
+            quantity=actual_qty,
             price=Decimal(str(current_price)),
             sl_price=Decimal(str(sl_price)),
             target_price=Decimal(str(tgt_price)),
             instrument_type="options",
-            broker=account, 
+            broker=account,
             exchange_order_id=exchange_order_id,
             mode=strategy.mode,
         )
         logger.info(
-            "Fyers options order placed | order_id=%s | exchange_id=%s",
-            order.id if order else None,
-            exchange_order_id,
+            "Fyers options order placed | lots=%d | qty=%d | order_id=%s | exchange_id=%s",
+            qty, actual_qty, order.id if order else None, exchange_order_id,
         )
         return order
     else:
+        reject_reason = resp.get("message", "Unknown error")
         logger.error("Fyers options order FAILED | resp=%s", resp)
-        _ws_notify_failure(strategy.user, strategy.algo_name, resp.get("message", "Unknown error")) 
+        _ws_notify_failure(effective_user or strategy.user, strategy.algo_name, reject_reason)
+        # ── ✅ FIX: Rejected order DB mein save karo ──────────────
+        _save_rejected_broker_order(
+            strategy=strategy,
+            signal=signal,
+            user=effective_user or strategy.user,
+            account=account,
+            reason=f"Broker rejected: {reject_reason}",
+            broker_response=resp,
+        )
         return None
 
 
-def _fyers_futures_order(strategy, signal, fyers, account, qty: int, risk: dict):
+def _fyers_futures_order(strategy, signal, fyers, account, qty: int, risk: dict, effective_user=None):
     """Fyers F&O futures order"""
     from apps.orders.services import create_order
 
-    from .fyers_utils import get_current_futures_symbol
+    from .fyers_utils import get_current_futures_symbol, LOT_SIZES, _clean_symbol
 
     symbol = signal.symbol
     signal_type = signal.signal_type
@@ -218,6 +968,15 @@ def _fyers_futures_order(strategy, signal, fyers, account, qty: int, risk: dict)
     if not futures_symbol:
         logger.error("Futures symbol nahi mila | symbol=%s", symbol)
         return None
+
+    # ── FIX: qty = lots (Flutter se), actual_qty = lots × lot_size ──
+    base = _clean_symbol(symbol)
+    lot_size = LOT_SIZES.get(base, 1)
+    actual_qty = qty * lot_size
+    logger.info(
+        "Futures qty | lots=%d | lot_size=%d | actual_qty=%d | symbol=%s",
+        qty, lot_size, actual_qty, base,
+    )
 
     sl_pct = float(risk.get("sl_pct", 0.5))
     target_pct = float(risk.get("target_pct", 1.0))
@@ -233,10 +992,10 @@ def _fyers_futures_order(strategy, signal, fyers, account, qty: int, risk: dict)
 
     order_data = {
         "symbol": futures_symbol,
-        "qty": qty,
+        "qty": actual_qty,
         "type": 2,  # Market
         "side": side,
-        "productType": "INTRADAY",
+        "productType": "MARGIN",  # Fyers F&O futures ke liye MARGIN chahiye, INTRADAY nahi
         "limitPrice": 0,
         "stopPrice": 0,
         "validity": "DAY",
@@ -252,7 +1011,7 @@ def _fyers_futures_order(strategy, signal, fyers, account, qty: int, risk: dict)
             strategy=strategy,
             symbol=futures_symbol,
             side=signal_type,
-            quantity=qty,
+            quantity=actual_qty,
             price=Decimal(str(current_price)),
             sl_price=Decimal(str(sl_price)),
             target_price=Decimal(str(tgt_price)),
@@ -262,16 +1021,26 @@ def _fyers_futures_order(strategy, signal, fyers, account, qty: int, risk: dict)
             mode=strategy.mode,
         )
         logger.info(
-            "Fyers futures order placed | order_id=%s", order.id if order else None
+            "Fyers futures order placed | lots=%d | qty=%d | order_id=%s",
+            qty, actual_qty, order.id if order else None,
         )
         return order
     else:
+        reject_reason = resp.get("message", "Unknown error")
         logger.error("Fyers futures order FAILED | resp=%s", resp)
-        _ws_notify_failure(strategy.user, strategy.algo_name, resp.get("message", "Unknown error"))
+        _ws_notify_failure(effective_user or strategy.user, strategy.algo_name, reject_reason)
+        _save_rejected_broker_order(
+            strategy=strategy,
+            signal=signal,
+            user=effective_user or strategy.user,
+            account=account,
+            reason=f"Broker rejected: {reject_reason}",
+            broker_response=resp,
+        )
         return None
 
 
-def _fyers_equity_order(strategy, signal, fyers, account, qty: int, risk: dict):
+def _fyers_equity_order(strategy, signal, fyers, account, qty: int, risk: dict, effective_user=None):
     """Fyers equity (cash) segment order"""
     from apps.orders.services import create_order
 
@@ -325,8 +1094,17 @@ def _fyers_equity_order(strategy, signal, fyers, account, qty: int, risk: dict):
         )
         return order
     else:
+        reject_reason = resp.get("message", "Unknown error")
         logger.error("Fyers equity order FAILED | resp=%s", resp)
-        _ws_notify_failure(strategy.user, strategy.algo_name, resp.get("message", "Unknown error"))
+        _ws_notify_failure(effective_user or strategy.user, strategy.algo_name, reject_reason)
+        _save_rejected_broker_order(
+            strategy=strategy,
+            signal=signal,
+            user=effective_user or strategy.user,
+            account=account,
+            reason=f"Broker rejected: {reject_reason}",
+            broker_response=resp,
+        )
         return None
 
 
@@ -335,25 +1113,32 @@ def _fyers_equity_order(strategy, signal, fyers, account, qty: int, risk: dict):
 # ─────────────────────────────────────────────────────────────────
 
 
-def _place_delta_order(strategy, signal, instrument_type: str):
+def _place_delta_order(strategy, signal, instrument_type: str, user=None, account=None):
     """
     Delta Exchange pe order place karo.
     instrument_type:
       - 'futures' → futures contract
       - 'perp'    → perpetual contract (most common)
+
+    user, account: Global strategy routing ke liye subscriber ka user/account pass karo.
     """
     from apps.brokers.models import BrokerAccount
     from apps.orders.services import create_order
 
-    account = BrokerAccount.objects.filter(
-        user=strategy.user,
-        broker="delta",
-        is_active=True,
-        is_verified=True,
-    ).first()
+    # ── Effective user determine karo ─────────────────────────────
+    effective_user = user or strategy.user
+
+    # ── Broker account fetch (ya use passed account) ───────────────
+    if account is None:
+        account = BrokerAccount.objects.filter(
+            user=effective_user,
+            broker="delta",
+            is_active=True,
+            is_verified=True,
+        ).first()
 
     if not account:
-        logger.error("Delta account not connected for user %s", strategy.user.pk)
+        logger.error("Delta account not connected for user %s", effective_user.pk)
         return None
 
     symbol = signal.symbol  # e.g. 'BTCUSDT'
@@ -375,7 +1160,7 @@ def _place_delta_order(strategy, signal, instrument_type: str):
         side = "sell"
 
     # Delta product type
-    product_type = "perpetual_futures" if instrument_type == "perp" else "futures"
+    product_type = "perp" if instrument_type == "perp" else "futures"
 
     try:
         # Delta API call
@@ -466,30 +1251,449 @@ def _call_delta_api(account, symbol, side, qty, product_type, current_price):
     return resp.json()
 
 
+
+# ─────────────────────────────────────────────────────────────────
+#  DHAN ORDER PLACEMENT
+#  Dhan broker pe options/futures/equity orders
+# ─────────────────────────────────────────────────────────────────
+
+def _place_dhan_order(strategy, signal, instrument_type: str, user=None, account=None):
+    """
+    Dhan pe order place karo.
+    instrument_type: options / futures / equity
+
+    ✅ DhanAdapter.place_order() use karta hai — same interface as Fyers.
+    Dhan ka securityId + exchange_segment DhanSymbolMapper se auto-resolve hota hai.
+    """
+    from apps.brokers.models import BrokerAccount
+    from apps.orders.services import create_order
+    from broker_adapters.dhan.adapter import DhanAdapter
+    from broker_adapters.dhan.symbol_mapper import get_lot_size
+
+    effective_user = user or strategy.user
+
+    # ── Risk check ─────────────────────────────────────────────────
+    try:
+        from apps.risk.manager import RiskManager
+        rm = RiskManager(effective_user)
+        allowed, reason = rm.can_place_order(
+            symbol=signal.symbol,
+            qty=1,
+            price=float(signal.price),
+        )
+        if not allowed:
+            logger.warning(
+                "❌ Risk check FAILED (Dhan) | user=%s | symbol=%s | reason=%s",
+                effective_user.pk, signal.symbol, reason,
+            )
+            _save_rejected_broker_order(
+                strategy=strategy, signal=signal,
+                user=effective_user, account=account,
+                reason=f"Risk check failed: {reason}",
+            )
+            return None
+    except Exception as risk_err:
+        logger.error("RiskManager error (Dhan) | user=%s | %s — BLOCKED", effective_user.pk, risk_err)
+        return None
+
+    # ── Account ────────────────────────────────────────────────────
+    if account is None:
+        account = BrokerAccount.objects.filter(
+            user=effective_user, broker="dhan",
+            is_active=True, is_verified=True,
+        ).exclude(dhan_access_token="").first()
+
+    if not account:
+        logger.error("Dhan account not connected | user=%s", effective_user.pk)
+        return None
+
+    adapter = DhanAdapter({
+        "dhan_client_id":    account.dhan_client_id,
+        "dhan_access_token": account.dhan_access_token,
+    })
+
+    risk          = strategy.risk_config
+    signal_type   = signal.signal_type
+    current_price = float(signal.price)
+    sl_pct        = float(risk.get("sl_pct", 0.5))
+    target_pct    = float(risk.get("target_pct", 1.0))
+
+    # ── Symbol + qty ───────────────────────────────────────────────
+    symbol = signal.symbol  # e.g. "NIFTY", "NIFTY26JUN2524500CE"
+
+    if instrument_type == "options":
+        # Options symbol (already resolved by signal, or build ATM)
+        if symbol.endswith("CE") or symbol.endswith("PE"):
+            dhan_symbol = symbol
+        else:
+            # Build ATM option symbol (same logic as Fyers)
+            from apps.strategies.fyers_utils import get_atm_option_symbol
+            opt_type = "CE" if signal_type == "buy" else "PE"
+            dhan_symbol = get_atm_option_symbol(symbol, current_price, opt_type, user=effective_user)
+            if not dhan_symbol:
+                logger.error("Dhan: ATM option symbol nahi mila | symbol=%s", symbol)
+                return None
+
+        lot_size   = get_lot_size(dhan_symbol)
+        qty_lots   = int(risk.get("qty", 1))
+        actual_qty = qty_lots * lot_size
+        product_type = "MARGIN"
+
+    elif instrument_type == "futures":
+        # Futures symbol
+        from apps.strategies.fyers_utils import get_current_futures_symbol
+        fyers_fut = get_current_futures_symbol(symbol)
+        # Convert Fyers format → Dhan format (strip NSE: prefix)
+        dhan_symbol = fyers_fut.replace("NSE:", "").replace("BSE:", "") if fyers_fut else symbol
+        lot_size    = get_lot_size(dhan_symbol)
+        qty_lots    = int(risk.get("qty", 1))
+        actual_qty  = qty_lots * lot_size
+        product_type = "MARGIN"
+
+    else:  # equity
+        dhan_symbol = f"NSE:{symbol}-EQ" if ":" not in symbol else symbol
+        actual_qty   = int(risk.get("qty", 1))
+        product_type = "CNC"
+
+    # ── SL / TP ────────────────────────────────────────────────────
+    if signal_type == "buy":
+        sl_price  = round(current_price * (1 - sl_pct / 100), 2)
+        tgt_price = round(current_price * (1 + target_pct / 100), 2)
+    else:
+        sl_price  = round(current_price * (1 + sl_pct / 100), 2)
+        tgt_price = round(current_price * (1 - target_pct / 100), 2)
+
+    logger.info(
+        "Dhan order | user=%s | %s %s | qty=%d | price=%.2f | sl=%.2f | tgt=%.2f",
+        effective_user.pk, signal_type.upper(), dhan_symbol,
+        actual_qty, current_price, sl_price, tgt_price,
+    )
+
+    # ── Place order ────────────────────────────────────────────────
+    result = adapter.place_order(
+        symbol=dhan_symbol,
+        side=signal_type.lower(),
+        qty=actual_qty,
+        order_type="market",
+        product_type=product_type,
+    )
+
+    if result.success:
+        order = create_order(
+            strategy=strategy,
+            symbol=dhan_symbol,
+            side=signal_type,
+            quantity=actual_qty,
+            price=Decimal(str(current_price)),
+            sl_price=Decimal(str(sl_price)),
+            target_price=Decimal(str(tgt_price)),
+            instrument_type=instrument_type,
+            broker=account,
+            exchange_order_id=result.order_id or "",
+            broker_response=result.raw,
+            mode=strategy.mode,
+        )
+        logger.info(
+            "✅ Dhan order placed | user=%s | order_id=%s | exchange_id=%s",
+            effective_user.pk, order.id if order else None, result.order_id,
+        )
+        return order
+    else:
+        logger.error("❌ Dhan order FAILED | user=%s | reason=%s", effective_user.pk, result.message)
+        _ws_notify_failure(effective_user, strategy.algo_name, result.message)
+        _save_rejected_broker_order(
+            strategy=strategy, signal=signal,
+            user=effective_user, account=account,
+            reason=f"Dhan rejected: {result.message}",
+            broker_response=result.raw if hasattr(result, "raw") else {},
+        )
+        return None
+
+
 def _get_delta_product_id(delta_symbol: str) -> int:
-    # ✅ India pe BTCUSD ID = 27
+    """
+    Delta India product IDs — perpetual contracts.
+
+    FIX: Pehle API se live lookup karo — hardcoded IDs stale ho sakte hain.
+    Fallback: known IDs use karo agar API fail ho.
+
+    Verify/update: https://api.india.delta.exchange/v2/products
+    """
+    # Step 1: Live API se try karo
+    try:
+        import requests as _req
+        r = _req.get("https://api.india.delta.exchange/v2/products", timeout=5)
+        if r.status_code == 200:
+            for product in r.json().get("result", []):
+                if (
+                    product.get("symbol") == delta_symbol
+                    and product.get("contract_type") in ("perpetual_futures", "futures")
+                ):
+                    logger.info("Delta product ID (live) | symbol=%s | id=%s", delta_symbol, product["id"])
+                    return int(product["id"])
+    except Exception as _lookup_err:
+        logger.warning("Delta product ID live lookup failed: %s — using fallback", _lookup_err)
+
+    # Step 2: Known fallback IDs
+    # ✅ VERIFIED 2026-05-29 from https://api.india.delta.exchange/v2/products
     product_ids = {
-        "BTCUSD": 27,
-        "ETHUSD": 28,   # verify karo
-        "SOLUSD": 29, 
-        "BNBUSD": 30,  # verify karo
+        "BTCUSD": 27,    # BTC Perpetual — verified ✅
+        "ETHUSD": 3136,  # ETH Perpetual — FIX: was 3 (wrong), now 3136 (verified from API)
+        "SOLUSD": 14823, # SOL Perpetual — verified ✅
+        "BNBUSD": 15042, # BNB Perpetual — verified ✅
+        "XRPUSD": 14969, # XRP Perpetual — verified ✅
     }
     product_id = product_ids.get(delta_symbol)
     if product_id is None:
-        raise ValueError(f"Delta product ID not found: {delta_symbol}")
+        raise ValueError(
+            f"Delta product ID not found: {delta_symbol}. "
+            f"Check https://api.india.delta.exchange/v2/products"
+        )
+    logger.info("Delta product ID (fallback) | symbol=%s | id=%d", delta_symbol, product_id)
     return product_id
 
 def _to_delta_symbol(symbol: str, product_type: str) -> str:
-    """BTCUSDT → Delta ke format mein convert karo"""
+    """
+    BTCUSDT / BTC-USDT dono formats → Delta ke format mein convert karo.
+    ✅ FIX: ETH-USDT, BTC-USDT (hyphen wale) bhi handle karo.
+    """
+    # Normalize: BTC-USDT → BTCUSDT (hyphen remove karo)
+    normalized = symbol.replace("-", "")
+
     mapping = {
         "BTCUSDT": {"perp": "BTCUSD", "futures": "BTCUSD"},
         "ETHUSDT": {"perp": "ETHUSD", "futures": "ETHUSD"},
         "SOLUSDT": {"perp": "SOLUSD", "futures": "SOLUSD"},
         "BNBUSDT": {"perp": "BNBUSD", "futures": "BNBUSD"},
+        "XRPUSDT": {"perp": "XRPUSD", "futures": "XRPUSD"},
     }
-    return mapping.get(symbol, {}).get(product_type, symbol.replace("USDT", "USD"))
+    result = mapping.get(normalized, {}).get(product_type)
+    if result:
+        return result
+    # Fallback: USDT ya USDT suffix hata ke USD lagao
+    return normalized.replace("USDT", "USD")
 
 
+
+
+# ─────────────────────────────────────────────────────────────────
+#  REJECTED / FAILED ORDER — DB mein save karo
+# ─────────────────────────────────────────────────────────────────
+
+def _save_rejected_broker_order(strategy, signal, user, account, reason: str, broker_response: dict = None):
+    """
+    Jab bhi order reject ho — chahe broker ne kiya ya risk check ne block kiya —
+    BrokerOrder DB mein REJECTED status ke saath save karo.
+
+    Isse:
+    - Admin dashboard pe saare rejected orders dikhte hain
+    - Fyers orders count == DB orders count (screenshot issue fix)
+    - Audit trail bana rehta hai
+
+    Called from:
+    - _place_fyers_order()  → risk check fail
+    - _fyers_options_order() → fyers.place_order() failure
+    - _fyers_futures_order() → fyers.place_order() failure
+    - _fyers_equity_order()  → fyers.place_order() failure
+    """
+    try:
+        from apps.orders.services import create_order
+        from apps.brokers.models import BrokerOrder
+
+        # ── DB mein Order record banao (rejected state mein) ──────
+        order = create_order(
+            strategy=strategy,
+            symbol=signal.symbol,
+            side=signal.signal_type,
+            quantity=1,  # actual qty unknown at reject time
+            price=Decimal(str(float(signal.price))),
+            instrument_type=getattr(strategy, "instrument_type", "options"),
+            broker=account,
+            mode=getattr(strategy, "mode", "live"),
+        )
+
+        if order and account:
+            # ── BrokerOrder REJECTED status se create karo ────────
+            BrokerOrder.objects.create(
+                broker_account   = account,
+                order            = order,
+                order_type       = BrokerOrder.OrderType.ENTRY,
+                status           = BrokerOrder.Status.REJECTED,
+                symbol           = signal.symbol,
+                side             = signal.signal_type.lower(),  # ✅ 'buy'/'sell' lowercase
+                quantity         = 1,                           # ✅ IntegerField
+                rejection_reason = reason[:500],
+                broker_response  = broker_response or {"rejection_reason": reason},
+                exchange_order_id = "",
+                notes            = f"auto-rejected | {reason[:200]}",
+            )
+            logger.info(
+                "💾 Rejected order saved to DB | user=%s | symbol=%s | reason=%s",
+                user.pk if user else "?", signal.symbol, reason,
+            )
+    except Exception as e:
+        # DB save fail hone pe silently log karo — order block already ho gaya
+        logger.error(
+            "Failed to save rejected order to DB | user=%s | err=%s",
+            user.pk if user else "?", e,
+        )
+
+
+# ─────────────────────────────────────────────────────────────────
+#  ZERODHA ORDER PLACEMENT (KiteConnect)
+# ─────────────────────────────────────────────────────────────────
+
+def _place_zerodha_order(strategy, signal, instrument_type: str, user=None, account=None):
+    """
+    Zerodha KiteConnect pe order place karo.
+    instrument_type: options / futures / equity
+
+    ✅ ZerodhaAdapter.place_order() use karta hai.
+    Zerodha ka symbol format: "NIFTY24JUN24500CE" (no exchange prefix)
+    Exchange: NFO for options/futures, NSE for equity.
+    """
+    from apps.brokers.models import BrokerAccount
+    from apps.orders.services import create_order
+    from broker_adapters.zerodha.adapter import ZerodhaAdapter
+    from apps.strategies.fyers_utils import get_lot_size as _get_lot_size
+
+    effective_user = user or strategy.user
+
+    # ── Risk check ─────────────────────────────────────────────────
+    try:
+        from apps.risk.manager import RiskManager
+        rm = RiskManager(effective_user)
+        allowed, reason = rm.can_place_order(
+            symbol=signal.symbol, qty=1, price=float(signal.price),
+        )
+        if not allowed:
+            logger.warning(
+                "❌ Risk check FAILED (Zerodha) | user=%s | symbol=%s | reason=%s",
+                effective_user.pk, signal.symbol, reason,
+            )
+            _save_rejected_broker_order(
+                strategy=strategy, signal=signal,
+                user=effective_user, account=account,
+                reason=f"Risk check failed: {reason}",
+            )
+            return None
+    except Exception as risk_err:
+        logger.error("RiskManager error (Zerodha) | user=%s | %s — BLOCKED", effective_user.pk, risk_err)
+        return None
+
+    # ── Account ────────────────────────────────────────────────────
+    if account is None:
+        account = BrokerAccount.objects.filter(
+            user=effective_user, broker="zerodha",
+            is_active=True, is_verified=True,
+        ).exclude(access_token="").first()
+
+    if not account:
+        logger.error("Zerodha account not connected | user=%s", effective_user.pk)
+        return None
+
+    adapter = ZerodhaAdapter({
+        "api_key":      account.api_key,
+        "access_token": account.access_token,
+    })
+
+    risk          = strategy.risk_config
+    signal_type   = signal.signal_type
+    current_price = float(signal.price)
+    sl_pct        = float(risk.get("sl_pct", 0.5))
+    target_pct    = float(risk.get("target_pct", 1.0))
+    symbol        = signal.symbol
+
+    # ── Symbol + qty + exchange ────────────────────────────────────
+    if instrument_type == "options":
+        from apps.strategies.fyers_utils import get_atm_option_symbol
+        opt_type = "CE" if signal_type == "buy" else "PE"
+
+        if symbol.endswith("CE") or symbol.endswith("PE"):
+            zerodha_symbol = symbol  # Already an option symbol
+        else:
+            fyers_sym = get_atm_option_symbol(symbol, current_price, opt_type, user=effective_user)
+            # Fyers format: NSE:NIFTY26JUN2524500CE → Zerodha: NIFTY26JUN2524500CE (NFO)
+            zerodha_symbol = fyers_sym.replace("NSE:", "").replace("BSE:", "") if fyers_sym else None
+
+        if not zerodha_symbol:
+            logger.error("Zerodha: option symbol nahi mila | symbol=%s", symbol)
+            return None
+
+        lot_size   = _get_lot_size(symbol) if hasattr(_get_lot_size, "__call__") else 1
+        qty_lots   = int(risk.get("qty", 1))
+        actual_qty = qty_lots * lot_size
+        exchange   = "NFO"
+        product    = "MIS"  # Intraday
+
+    elif instrument_type == "futures":
+        from apps.strategies.fyers_utils import get_current_futures_symbol
+        fyers_fut = get_current_futures_symbol(symbol) or ""
+        zerodha_symbol = fyers_fut.replace("NSE:", "").replace("BSE:", "")
+        lot_size   = _get_lot_size(symbol) if hasattr(_get_lot_size, "__call__") else 1
+        qty_lots   = int(risk.get("qty", 1))
+        actual_qty = qty_lots * lot_size
+        exchange   = "NFO"
+        product    = "MIS"
+
+    else:  # equity
+        zerodha_symbol = symbol.replace("NSE:", "").replace("-EQ", "")
+        actual_qty     = int(risk.get("qty", 1))
+        exchange       = "NSE"
+        product        = "CNC"
+
+    # ── SL / TP ────────────────────────────────────────────────────
+    if signal_type == "buy":
+        sl_price  = round(current_price * (1 - sl_pct / 100), 2)
+        tgt_price = round(current_price * (1 + target_pct / 100), 2)
+    else:
+        sl_price  = round(current_price * (1 + sl_pct / 100), 2)
+        tgt_price = round(current_price * (1 - target_pct / 100), 2)
+
+    logger.info(
+        "Zerodha order | user=%s | %s %s | qty=%d | exchange=%s | price=%.2f",
+        effective_user.pk, signal_type.upper(), zerodha_symbol,
+        actual_qty, exchange, current_price,
+    )
+
+    # ── Place order ────────────────────────────────────────────────
+    result = adapter.place_order(
+        symbol=zerodha_symbol,
+        side=signal_type.lower(),
+        qty=actual_qty,
+        order_type="market",
+        exchange=exchange,
+        product=product,
+    )
+
+    if result.success:
+        order = create_order(
+            strategy=strategy,
+            symbol=zerodha_symbol,
+            side=signal_type,
+            quantity=actual_qty,
+            price=Decimal(str(current_price)),
+            sl_price=Decimal(str(sl_price)),
+            target_price=Decimal(str(tgt_price)),
+            instrument_type=instrument_type,
+            broker=account,
+            exchange_order_id=result.order_id or "",
+            mode=strategy.mode,
+        )
+        logger.info(
+            "✅ Zerodha order placed | user=%s | order_id=%s | exchange_id=%s",
+            effective_user.pk, order.id if order else None, result.order_id,
+        )
+        return order
+    else:
+        logger.error("❌ Zerodha order FAILED | user=%s | reason=%s", effective_user.pk, result.message)
+        _ws_notify_failure(effective_user, strategy.algo_name, result.message)
+        _save_rejected_broker_order(
+            strategy=strategy, signal=signal,
+            user=effective_user, account=account,
+            reason=f"Zerodha rejected: {result.message}",
+        )
+        return None
 
 
 # ─────────────────────────────────────────────────────────────────

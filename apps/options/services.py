@@ -34,12 +34,12 @@ _STRIKE_STEPS = {
     "BANKEX":     100,
 }
 
-# Lot size mapping (NSE standard - verify before use, NSE changes periodically)
+# Lot size mapping (NSE April 2025 revision — fyers_utils.LOT_SIZES ke saath sync)
 _LOT_SIZES = {
-    "NIFTY":      75,
+    "NIFTY":      65,   # April 2025 revised
     "BANKNIFTY":  30,
-    "FINNIFTY":   40,
-    "MIDCPNIFTY": 75,
+    "FINNIFTY":   60,   # April 2025 revised (was 40)
+    "MIDCPNIFTY": 120,  # April 2025 revised (was 75)
     "SENSEX":     10,
     "BANKEX":     15,
 }
@@ -107,24 +107,35 @@ def nearest_expiry(monthly: bool = False) -> date:
             monthly_expiry = last_day2 - timedelta(days=days_back2)
         return monthly_expiry
 
-    # Weekly — next Thursday
-    days_until_thu = (3 - today.weekday() + 7) % 7
-    if days_until_thu == 0:
-        days_until_thu = 7
+    # Weekly — aaj ya agla Thursday
+    # FIX: aaj Thursday ho toh aaj ka expiry return karo (pehle +7 ho jaata tha)
+    days_until_thu = (3 - today.weekday()) % 7
     return today + timedelta(days=days_until_thu)
 
 
 def format_fyers_symbol(name: str, expiry: date, strike: int, otype: str) -> str:
     """
-    NSE Fyers option symbol format: NSE:NIFTY25MAY2221500CE
-    Format: NSE:{NAME}{YY}{MON}{DD}{STRIKE}{TYPE}
+    NSE Fyers weekly option symbol format: NSE:NIFTY2652123650PE
+    Format: NSE:{NAME}{YY}{M}{DD}{STRIKE}{TYPE}
+
+    ✅ FIX: Weekly options use single-char month code (1-9, O, N, D)
+    Monthly futures use 3-char (JAN, MAY etc.) — but that is NOT used here.
+
+    Examples:
+        NIFTY, 2026-05-21, 23650, PE → NSE:NIFTY2652123650PE
+        BANKNIFTY, 2026-05-21, 53600, CE → NSE:BANKNIFTY2652153600CE
     """
-    months = ["", "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
-              "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]
+    # Single-char month codes: Jan=1 ... Sep=9, Oct=O, Nov=N, Dec=D
+    _WEEKLY_MONTH = {
+        1: "1", 2: "2", 3: "3", 4: "4", 5: "5",
+        6: "6", 7: "7", 8: "8", 9: "9",
+        10: "O", 11: "N", 12: "D",
+    }
     yy  = str(expiry.year)[2:]
-    mon = months[expiry.month]
+    mon = _WEEKLY_MONTH[expiry.month]
     dd  = str(expiry.day).zfill(2)
-    return f"NSE:{name.upper()}{yy}{mon}{dd}{int(strike)}{otype}"
+    exchange = "BSE" if name.upper() in ("SENSEX", "BANKEX") else "NSE"
+    return f"{exchange}:{name.upper()}{yy}{mon}{dd}{int(strike)}{otype}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -379,16 +390,19 @@ def close_trade(trade_id: int, close_price: float, reason: str = "manual") -> Di
                 except ImportError:
                     logger.warning("BrokerAdapterFactory not available, skipping broker order")
                 
-                # Update BrokerOrder metadata
+                # BrokerOrder ko exit details ke saath update karo
                 bo = BrokerOrder.objects.filter(
                     option_trade=trade,
-                    order_type="ENTRY",  # Assuming OrderType.ENTRY exists
+                    order_type=BrokerOrder.OrderType.ENTRY,  # ✅ FIX: enum use karo
                 ).first()
                 if bo:
-                    metadata = bo.metadata or {}
-                    metadata.update({"realized_pnl": realized_pnl, "exit_reason": reason})
-                    bo.metadata = metadata
-                    bo.save(update_fields=["metadata"])
+                    # metadata field exist nahi karta — notes mein append karo
+                    existing_notes = bo.notes or ""
+                    bo.notes = (
+                        existing_notes +
+                        f" | exit: pnl={realized_pnl:.2f} reason={reason}"
+                    )
+                    bo.save(update_fields=["notes"])
                     
             except Exception as exc:
                 logger.warning("close_trade: Live mode processing failed | %s", exc)
@@ -503,6 +517,21 @@ def place_live_option_trade(
     contract = get_atm_contract(symbol_name, spot, option_type, expiry=expiry, monthly=monthly)
     qty      = lots * sym.lot_size
 
+    # ── 1b. ✅ Market hours guard — live orders sirf NSE hours mein ──────────
+    from django.utils import timezone as tz
+    import datetime
+    now_ist = tz.localtime(tz.now(), datetime.timezone(datetime.timedelta(hours=5, minutes=30)))
+    market_open  = now_ist.replace(hour=9, minute=15, second=0, microsecond=0)
+    market_close = now_ist.replace(hour=15, minute=30, second=0, microsecond=0)
+    is_weekday   = now_ist.weekday() < 5  # Mon-Fri
+
+    if not (is_weekday and market_open <= now_ist <= market_close):
+        logger.warning(
+            "place_live_option_trade: Market closed | user=%s | time=%s",
+            user.pk, now_ist.strftime("%H:%M %Z"),
+        )
+        return {"success": False, "error": "Market closed (NSE: 9:15–15:30 IST, Mon–Fri)"}
+
     # ── 2. Broker account dhundo ─────────────────────────────────────────────
     broker_qs = BrokerAccount.objects.filter(user=user, is_active=True, is_verified=True)
     if strategy and hasattr(strategy, "broker") and strategy.broker:
@@ -512,6 +541,30 @@ def place_live_option_trade(
 
     if not broker_account:
         return {"success": False, "error": "No active verified broker account found"}
+
+    # ── 2b. ✅ Risk check — order place karne se pehle ───────────────────────
+    # place_live_option_trade() ko directly call karne wale bhi risk rules follow karein.
+    try:
+        from apps.risk.manager import RiskManager
+        rm = RiskManager(user)
+        allowed, reason = rm.can_place_order(
+            symbol=contract.fyers_symbol if hasattr(contract, "fyers_symbol") else symbol_name,
+            qty=lots,
+            price=entry_price,
+            stop_loss=Decimal(str(stop_loss)),
+        )
+        if not allowed:
+            logger.warning(
+                "❌ place_live_option_trade: Risk check blocked | user=%s | reason=%s",
+                user.pk, reason,
+            )
+            return {"success": False, "error": f"Risk check failed: {reason}"}
+    except Exception as risk_err:
+        logger.error(
+            "place_live_option_trade: RiskManager error | user=%s | err=%s — BLOCKED",
+            user.pk, risk_err,
+        )
+        return {"success": False, "error": "Risk check system error — order blocked"}
 
     # ── 3. OptionTrade + BrokerOrder atomic create ───────────────────────────
     with transaction.atomic():
@@ -536,23 +589,21 @@ def place_live_option_trade(
 
         broker_order = BrokerOrder.objects.create(
             broker_account = broker_account,
-            option_trade   = trade,              # legacy live flow FK
+            option_trade   = trade,                            # legacy live flow FK
             symbol         = contract.fyers_symbol,
-            direction      = action.upper(),
-            order_type     = "MARKET",
-            quantity       = float(qty),
+            side           = action.lower(),                   # ✅ FIX: direction→side
+            order_type     = BrokerOrder.OrderType.ENTRY,     # ✅ FIX: enum use karo
+            quantity       = int(qty),                        # ✅ FIX: IntegerField
             price          = float(entry_price),
-            stop_loss      = float(stop_loss),
-            take_profit    = float(target_price),
-            status         = "PENDING",  # Changed from BrokerOrder.Status.PENDING
-            metadata       = {
-                "lots":         lots,
-                "option_type":  option_type,
-                "strike":       contract.strike,
-                "expiry":       contract.expiry.isoformat(),
-                "spot_at_entry": spot,
-                "setup_type":   setup_type,
-            },
+            status         = BrokerOrder.Status.PENDING,      # ✅ FIX: enum use karo
+            # stop_loss/take_profit/metadata BrokerOrder mein nahi hain.
+            # OptionTrade mein pehle se stored hain (stop_loss, target_price).
+            # Extra context ke liye notes use karo.
+            notes          = (
+                f"lots={lots} | type={option_type} | "
+                f"strike={contract.strike} | expiry={contract.expiry.isoformat()} | "
+                f"spot={spot} | setup={setup_type}"
+            ),
         )
 
     # ── 4. Celery task — broker ko bhejo ─────────────────────────────────────

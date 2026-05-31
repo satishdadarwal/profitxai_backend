@@ -10,7 +10,15 @@ from celery import group, shared_task
 logger = logging.getLogger(__name__)
 
 
-@shared_task
+@shared_task(
+    name="strategies.run_all_active_strategies",
+    queue="strategies",
+    # ✅ FIX: expires=55 — agar 60s cycle mein task still pending hai
+    # toh next cycle ke liye drop karo, purana task execute mat karo.
+    # Yahi "18 baar dispatch" ka cure hai jab Beat backlog clear hota hai.
+    soft_time_limit=50,
+    time_limit=58,
+)
 def run_all_active_strategies():
     from apps.strategies.models import Strategy
 
@@ -69,7 +77,7 @@ def run_all_active_strategies():
     acks_late=True,
 )
 def run_strategy_cycle(self, strategy_id: str):
-    from .models import Strategy
+    from .models import Strategy, UserStrategyPreference
     from .services import (
         StrategyError,
         StrategyNotRunningError,
@@ -85,7 +93,6 @@ def run_strategy_cycle(self, strategy_id: str):
         return
 
     if not strategy.is_running:
-        # ✅ FIX: Clear log — user ko dashboard se restart karne ki guidance do
         logger.warning(
             "Strategy %s is %s — skipping cycle. "
             "Reason: %s. Restart from dashboard to resume.",
@@ -95,12 +102,39 @@ def run_strategy_cycle(self, strategy_id: str):
         )
         return
 
+    # ─────────────────────────────────────────────────────────────
+    # ✅ FIX: Global strategy — sirf woh subscribers jinhone
+    # is strategy ko KHUD start kiya hai (UserStrategyPreference.is_running=True)
+    # unke liye cycle chalao. Creator (Satish) ke context mein NAHI.
+    #
+    # Pehle bug: strategy.user=Satish ke context mein cycle chalta tha,
+    # isliye execute_cycle_ict Satish ka Delta account use karta tha —
+    # chahe Chanchal hi active subscriber ho. Satish ka balance ~$0.009
+    # hone ki wajah se har order fail ho raha tha.
+    # ─────────────────────────────────────────────────────────────
+    if strategy.is_global:
+        _run_global_strategy_per_subscriber(self, strategy_id, strategy)
+        return
+
+    # ── Non-global (personal) strategy ─────────────────────────
+    # User ka preferred_mode apply karo
+    try:
+        pref = UserStrategyPreference.objects.get(
+            user=strategy.user, strategy=strategy
+        )
+        if pref.preferred_mode and pref.preferred_mode != strategy.mode:
+            logger.info(
+                "Mode override applied | strategy=%s | db_mode=%s | preferred_mode=%s",
+                strategy_id, strategy.mode, pref.preferred_mode,
+            )
+            strategy.mode = pref.preferred_mode
+    except Exception:
+        pass  # No preference set — use strategy.mode as-is
+
     sub = getattr(strategy.user, "subscription", None)
     if sub and not sub.is_access_granted:
         logger.warning(
             "Subscription expired for user %s — stopping strategy %s",
-            # FIX: strategy.user_id → strategy.user.pk
-            # Pylance doesn't recognise auto-generated `_id` attrs on UUID-pk models
             strategy.user.pk,
             strategy_id,
         )
@@ -151,6 +185,132 @@ def run_strategy_cycle(self, strategy_id: str):
                     state=Strategy.State.ERROR,
                     error_msg=f"Max retries exceeded: {exc}",
                     updated_at=timezone.now(),
+                )
+
+
+def _run_global_strategy_per_subscriber(task_self, strategy_id: str, strategy):
+    """
+    Global strategy ke liye har active subscriber ke apne context mein
+    cycle chalao — creator (Satish) ke broker se NAHI.
+
+    Yeh fix karta hai:
+    - Bug: strategy.user=Satish ke context mein cycle chalta tha →
+      Satish ka near-empty Delta account se orders fail hote the.
+    - Fix: Sirf woh users jinhone strategy start ki hai (is_running=True)
+      unke apne broker account se cycle chalao.
+    """
+    from django.contrib.auth import get_user_model
+    from apps.brokers.models import BrokerAccount
+    from .models import Strategy, UserStrategyPreference
+    from .services import (
+        StrategyError,
+        StrategyNotRunningError,
+        execute_cycle,
+        stop_strategy,
+    )
+
+    User = get_user_model()
+    creator_id = strategy.user.pk if strategy.user else None
+    strategy_broker_slug = getattr(strategy.broker, "broker", "fyers") if strategy.broker else "fyers"
+
+    # ── Sirf woh subscribers jinhone strategy start ki hai ────────
+    running_prefs = UserStrategyPreference.objects.filter(
+        strategy=strategy,
+        is_running=True,
+    ).select_related("user")
+
+    if not running_prefs.exists():
+        logger.info(
+            "Global strategy %s | no active subscribers — skipping cycle.",
+            strategy_id,
+        )
+        return
+
+    logger.info(
+        "Global strategy %s | running for %d active subscriber(s)",
+        strategy_id, running_prefs.count(),
+    )
+
+    for pref in running_prefs:
+        subscriber = pref.user
+
+        # Creator ka order global routing se nahi — uska apna personal
+        # strategy hona chahiye agar woh khud trade karna chahta hai
+        if subscriber.pk == creator_id:
+            logger.debug(
+                "Global strategy %s | skipping creator user=%s in subscriber loop",
+                strategy_id, creator_id,
+            )
+            continue
+
+        # Subscriber ka subscription check
+        sub = getattr(subscriber, "subscription", None)
+        if sub and not sub.is_access_granted:
+            logger.warning(
+                "Subscription expired for subscriber %s — skipping for strategy %s",
+                subscriber.pk, strategy_id,
+            )
+            # is_running=False mark karo taaki agle cycle mein skip ho
+            pref.is_running = False
+            pref.save(update_fields=["is_running", "updated_at"])
+            continue
+
+        # Subscriber ka broker account check
+        subscriber_account = BrokerAccount.objects.filter(
+            user=subscriber,
+            broker=strategy_broker_slug,
+            is_active=True,
+            is_verified=True,
+        ).first()
+
+        if not subscriber_account:
+            logger.warning(
+                "Global strategy %s | subscriber=%s ka %s account nahi hai — skipping.",
+                strategy_id, subscriber.pk, strategy_broker_slug,
+            )
+            continue
+
+        # Subscriber ke context mein strategy object banao
+        # (in-memory override — DB save nahi hoga)
+        import copy
+        subscriber_strategy = copy.copy(strategy)
+        subscriber_strategy.user = subscriber
+        subscriber_strategy.broker = subscriber_account
+
+        # Preferred mode apply karo
+        if pref.preferred_mode and pref.preferred_mode != subscriber_strategy.mode:
+            logger.info(
+                "Global strategy %s | subscriber=%s | mode override: %s → %s",
+                strategy_id, subscriber.pk,
+                subscriber_strategy.mode, pref.preferred_mode,
+            )
+            subscriber_strategy.mode = pref.preferred_mode
+
+        logger.info(
+            "Global strategy %s | running cycle for subscriber=%s | broker=%s | mode=%s",
+            strategy_id, subscriber.pk, strategy_broker_slug, subscriber_strategy.mode,
+        )
+
+        symbols = subscriber_strategy.symbols if subscriber_strategy.symbols else [subscriber_strategy.symbol]
+
+        for symbol in symbols:
+            try:
+                signal = execute_cycle(subscriber_strategy, symbol=symbol)
+                logger.info(
+                    "Global cycle done | strategy=%s | subscriber=%s | symbol=%s | signal=%s",
+                    strategy_id, subscriber.pk, symbol,
+                    getattr(signal, 'signal_type', 'none'),
+                )
+            except StrategyNotRunningError:
+                logger.info(
+                    "Global strategy %s | subscriber=%s | stopped mid-cycle at %s",
+                    strategy_id, subscriber.pk, symbol,
+                )
+                break
+            except Exception as exc:
+                logger.exception(
+                    "Global cycle exception | strategy=%s | subscriber=%s | symbol=%s | %s",
+                    strategy_id, subscriber.pk, symbol, exc,
                 )
                 return
 
@@ -389,21 +549,17 @@ def take_performance_snapshots():
             fees = trade_agg["fees"] or 0
             win_rate = (wins / total_t) if total_t else 0
 
+            # ✅ FIX: Sirf model ke actual fields use karo
+            # Model fields: total_trades, win_rate, total_pnl, total_fees
             StrategyPerformanceSnapshot.objects.update_or_create(
                 strategy=strategy,
                 granularity=StrategyPerformanceSnapshot.Granularity.HOURLY,
                 period_start=now,
                 defaults={
-                    "total_signals": sig_agg["total"] or 0,
-                    "executed_signals": sig_agg["executed"] or 0,
                     "total_trades": total_t,
-                    "win_trades": wins,
-                    "loss_trades": total_t - wins,
-                    "realized_pnl": pnl,
-                    "total_fees": fees,
-                    "net_pnl": pnl - fees,
-                    "win_rate": win_rate,
-                    "avg_trade_pnl": (pnl / total_t) if total_t else 0,
+                    "win_rate":     win_rate,
+                    "total_pnl":    pnl - fees,   # net pnl
+                    "total_fees":   fees,
                 },
             )
             saved += 1

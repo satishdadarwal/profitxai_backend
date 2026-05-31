@@ -211,21 +211,20 @@ def execute_trade_task(self, signal_id: int, mode: str):
 
         broker_order = BrokerOrder.objects.create(
             broker_account  = broker_account,
-            order           = order_obj,          # ✅ CheckConstraint satisfy hogi
+            order           = order_obj,                      # ✅ CheckConstraint satisfy hogi
             symbol          = signal.symbol,
-            direction       = signal.direction.upper(),
-            order_type      = "MARKET",
-            quantity        = float(signal.lots),
+            side            = signal.direction.lower(),       # ✅ FIX: direction→side
+            order_type      = BrokerOrder.OrderType.ENTRY,   # ✅ FIX: enum use karo
+            quantity        = int(float(signal.lots)),        # ✅ FIX: IntegerField
             price           = float(signal.entry_price),
-            stop_loss       = float(signal.stop_loss),
-            take_profit     = float(signal.take_profit),
-            status          = BrokerOrder.Status.PENDING,
-            metadata        = {
-                "signal_id":    signal_id,
-                "trading_mode": mode,
-                "rr_ratio":     float(signal.rr_ratio),
-                "session_id":   signal.session_id,
-            },
+            status          = BrokerOrder.Status.PENDING,     # ✅ FIX: enum use karo
+            # stop_loss/take_profit/metadata BrokerOrder mein nahi hain —
+            # Order model mein sl_price/target_price already saved hain.
+            # Metadata ke liye notes field use karo.
+            notes           = (
+                f"signal_id={signal_id} | mode={mode} | "
+                f"rr={float(signal.rr_ratio)} | session={signal.session_id}"
+            ),
         )
 
         # Broker ko bhejo
@@ -415,19 +414,16 @@ def manual_order_place_task(self, manual_order_id: int):
 
         broker_order = BrokerOrder.objects.create(
             broker_account  = broker_account,
-            order           = order_obj,          # ✅ CheckConstraint satisfy
+            order           = order_obj,                      # ✅ CheckConstraint satisfy
             symbol          = mo.symbol,
-            direction       = mo.direction.upper(),
-            order_type      = mo.order_type,
-            quantity        = float(mo.lots),
+            side            = mo.direction.lower(),           # ✅ FIX: direction→side
+            order_type      = BrokerOrder.OrderType.ENTRY,   # ✅ FIX: enum use karo
+            quantity        = int(float(mo.lots)),            # ✅ FIX: IntegerField
             price           = float(mo.price) if mo.price else None,
-            stop_loss       = float(mo.stop_loss) if mo.stop_loss else None,
-            take_profit     = float(mo.take_profit) if mo.take_profit else None,
-            status          = BrokerOrder.Status.PENDING,
-            metadata        = {
-                "manual_order_id": manual_order_id,
-                "trading_mode":    "manual",
-            },
+            status          = BrokerOrder.Status.PENDING,     # ✅ FIX: enum use karo
+            # stop_loss/take_profit/metadata BrokerOrder mein nahi hain —
+            # Order model mein sl_price/target_price already stored hain.
+            notes           = f"manual_order_id={manual_order_id} | mode=manual",
         )
 
         place_broker_order.apply_async(args=[str(broker_order.id)], queue="orders")
@@ -501,7 +497,8 @@ def close_session_summary_task(session_id: int):
 
     fills = (
         BrokerOrder.objects.filter(
-            metadata__session_id=session_id,
+            # notes mein session_id store kiya execute_trade_task mein
+            notes__contains=f"session={session_id}",
             status=BrokerOrder.Status.COMPLETE,
         )
         .exclude(realized_pnl=None)

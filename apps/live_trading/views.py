@@ -249,14 +249,40 @@ def activity_log(request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def get_strategies(request):
-    """GET /api/live-trading/strategies/"""
+    """GET /api/live-trading/strategies/
+    
+    FIX: Pehle sirf user=request.user filter tha — global strategies
+    include nahi hoti thi. Ab apni + global (plan-based) dono return karta hai.
+    """
     from apps.strategies.models import Strategy
+    from django.db.models import Q
 
     try:
+        user = request.user
+
+        # ── Apni strategies ──────────────────────────────────────
+        own_q = Q(user=user, is_active=True)
+
+        # ── Global strategies — plan check ───────────────────────
+        # user.plan field se plan naam fetch karo (capitalize for match)
+        plan_val = getattr(user, 'plan', 'free') or 'free'
+
+        if plan_val != 'free':
+            # Paid user: allowed_plans empty (sab ko) OR plan match kare
+            plan_name = plan_val.capitalize()  # "elite" → "Elite"
+            plan_variants = list({plan_val, plan_name, plan_val.upper()})
+            plan_q = Q(allowed_plans=[])
+            for variant in plan_variants:
+                plan_q |= Q(allowed_plans__contains=[variant])
+
+            global_q = Q(is_global=True, is_active=True) & plan_q
+        else:
+            # Free user: sirf woh global jahan allowed_plans empty ho
+            global_q = Q(is_global=True, is_active=True, allowed_plans=[])
+
         strategies = Strategy.objects.filter(
-            user=request.user,
-            is_active=True
-        ).select_related('broker').order_by('-created_at')
+            own_q | global_q
+        ).select_related('broker').order_by('-created_at').distinct()
 
         strategy_list = []
         for s in strategies:
@@ -272,11 +298,16 @@ def get_strategies(request):
                 'mode': s.mode,
                 'state': s.state,
                 'broker': s.broker.broker if s.broker else None,
-                'broker_id': s.broker.id if s.broker else None,
+                'broker_id': str(s.broker.id) if s.broker else None,
                 'broker_name': s.broker.broker if s.broker else None,
                 'risk_config': s.risk_config,
                 'is_running': s.is_running,
                 'is_active': s.is_active,
+                # ✅ Global strategy fields — Flutter app ke liye
+                'is_global': s.is_global,
+                'allowed_plans': s.allowed_plans,
+                'created_by_admin': s.created_by_admin,
+                'is_editable': (s.user_id == user.pk),  # Global = not editable
                 'created_at': s.created_at.isoformat() if s.created_at else None,
                 'updated_at': s.updated_at.isoformat() if s.updated_at else None
             })
