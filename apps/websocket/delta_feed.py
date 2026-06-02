@@ -198,7 +198,7 @@ class DeltaFeedManager:
                         },
                     }
 
-                    self._broadcast("market", payload)
+                    # "market" group broadcast removed — duplicate ticks band karo
                     self._broadcast(symbol_group, payload)
                     self._publish_to_redis(payload["data"])
                     try:
