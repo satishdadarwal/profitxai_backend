@@ -1276,10 +1276,14 @@ def _place_dhan_order(strategy, signal, instrument_type: str, user=None, account
     try:
         from apps.risk.manager import RiskManager
         rm = RiskManager(effective_user)
+        _cp = float(signal.price)
+        _sl_pct = float(strategy.risk_config.get("sl_pct", 20))
+        _sl = round(_cp * (1 - _sl_pct / 100), 2)
         allowed, reason = rm.can_place_order(
             symbol=signal.symbol,
             qty=1,
-            price=float(signal.price),
+            price=_cp,
+            stop_loss=Decimal(str(_sl)),
         )
         if not allowed:
             logger.warning(

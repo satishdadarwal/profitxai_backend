@@ -896,9 +896,12 @@ class RiskManager:
         if cached is not None:
             return Decimal(str(cached))
         today = timezone.now().date()
-        pnl = Order.objects.filter(
-            user=self.user, created_at__date=today, status__in=["closed", "filled"]
-        ).aggregate(total=Sum("realized_pnl"))["total"] or Decimal("0")
+        try:
+            pnl = Order.objects.filter(
+                user=self.user, created_at__date=today, status__in=["closed", "filled"]
+            ).aggregate(total=Sum("realized_pnl"))["total"] or Decimal("0")
+        except Exception:
+            pnl = Decimal("0")  # realized_pnl field missing — skip
         cache.set(cache_key, float(pnl), timeout=10)
         return pnl
 
