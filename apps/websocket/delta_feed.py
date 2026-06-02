@@ -186,7 +186,7 @@ class DeltaFeedManager:
                             "symbol": normalized,
                             "ltp": float(ltp),
                             "change": float(data.get("change", 0)),
-                            "changePct": float(data.get("chg_pct", 0)),
+                            "changePct": round((float(data.get("change", 0)) / float(data.get("prev_close", 1))) * 100, 2) if float(data.get("prev_close", 0)) else float(data.get("chg_pct", 0)),
                             "open": float(data.get("open", 0)),
                             "high": float(data.get("high", 0)),
                             "low": float(data.get("low", 0)),
