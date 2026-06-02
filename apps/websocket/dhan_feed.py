@@ -62,7 +62,7 @@ MARKET_CLOSE_TIME = dt_time(15, 30)
 DHAN_BASE_URL = "https://api.dhan.co/v2"
 
 # Poll interval seconds (Dhan rate limit: 1 req/sec per endpoint)
-POLL_INTERVAL = 1.5
+POLL_INTERVAL = 3
 
 
 # ─────────────────────────────────────────────────────────────

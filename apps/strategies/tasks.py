@@ -16,8 +16,8 @@ logger = logging.getLogger(__name__)
     # ✅ FIX: expires=55 — agar 60s cycle mein task still pending hai
     # toh next cycle ke liye drop karo, purana task execute mat karo.
     # Yahi "18 baar dispatch" ka cure hai jab Beat backlog clear hota hai.
-    soft_time_limit=50,
-    time_limit=58,
+    soft_time_limit=300,
+    time_limit=360,
 )
 def run_all_active_strategies():
     from apps.strategies.models import Strategy
@@ -50,7 +50,7 @@ def run_all_active_strategies():
         run_strategy_cycle.s(str(sid))
         for sid in active_strategies
     )
-    result = job.apply_async()
+    result = job.apply_async(queue="strategies")
 
     logger.info(f"✅ Dispatched {len(active_strategies)} strategy tasks")
 
@@ -72,9 +72,8 @@ def run_all_active_strategies():
     queue="strategies",
     max_retries=3,
     default_retry_delay=30,
-    soft_time_limit=55,
-    time_limit=60,
-    acks_late=True,
+    soft_time_limit=120,
+    time_limit=150,
 )
 def run_strategy_cycle(self, strategy_id: str):
     from .models import Strategy, UserStrategyPreference
@@ -622,3 +621,61 @@ def run_ict_screener():
         except Exception as e:
             # FIX: account.user_id → account.user.pk
             logger.error("Screener error user=%s: %s", account.user.pk, e)
+
+@shared_task(name="strategies.auto_square_off", queue="strategies")
+def auto_square_off():
+    """
+    3:15 PM pe saari open MIS positions square off karo.
+    """
+    import datetime
+    from apps.brokers.models import BrokerAccount
+    from apps.strategies.models import UserStrategyPreference
+
+    now = datetime.datetime.now()
+    logger.info("Auto square off triggered | time=%s", now.strftime("%H:%M"))
+
+    # Saare active Fyers accounts
+    accounts = BrokerAccount.objects.filter(
+        broker="fyers",
+        is_active=True,
+        is_verified=True,
+    ).exclude(access_token="").exclude(access_token__isnull=True)
+
+    for account in accounts:
+        try:
+            from fyers_apiv3 import fyersModel
+            fyers = fyersModel.FyersModel(
+                client_id=account.app_id,
+                token=account.access_token,
+                log_path="", is_async=False,
+            )
+            # Open positions fetch karo
+            positions = fyers.positions()
+            net_positions = positions.get("netPositions", [])
+            closed = 0
+            for pos in net_positions:
+                qty = pos.get("netQty", 0)
+                if qty == 0:
+                    continue
+                symbol = pos.get("symbol", "")
+                # Square off — opposite side
+                side = -1 if qty > 0 else 1
+                result = fyers.place_order(data={
+                    "symbol": symbol,
+                    "qty": abs(qty),
+                    "type": 2,  # Market
+                    "side": side,
+                    "productType": "INTRADAY",
+                    "validity": "DAY",
+                    "offlineOrder": False,
+                    "stopLoss": 0,
+                    "takeProfit": 0,
+                })
+                logger.info(
+                    "Square off | symbol=%s | qty=%d | result=%s",
+                    symbol, abs(qty), result
+                )
+                closed += 1
+            logger.info("Square off done | account=%s | positions_closed=%d", account.id, closed)
+        except Exception as e:
+            logger.error("Square off error | account=%s | err=%s", account.id, e)

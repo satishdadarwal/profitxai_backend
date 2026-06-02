@@ -381,37 +381,58 @@ class FyersAdapter(BaseBrokerAdapter):
         to_ts: int,
     ) -> List[CandleBar]:
         from apps.brokers.symbol_mapper import normalize_for_fyers
+        from datetime import datetime, timedelta
+        import logging
+        _log = logging.getLogger(__name__)
         normalized_symbol = normalize_for_fyers(symbol)
 
-        from datetime import datetime
-        from_date = datetime.fromtimestamp(from_ts).strftime('%Y-%m-%d')
-        to_date = datetime.fromtimestamp(to_ts).strftime('%Y-%m-%d')
+        CHUNK_DAYS = 90
+        all_candles = []
+        chunk_start = datetime.fromtimestamp(from_ts)
+        end_dt = datetime.fromtimestamp(to_ts)
 
-        resp = self._get(
-            f"{self.DATA_URL}/history",
-            params={
-                "symbol": normalized_symbol,
-                "resolution": resolution,
-                "date_format": "1",
-                "range_from": from_date,
-                "range_to": to_date,
-                "cont_flag": "1",
-            },
-        )
-        candles_raw = resp.get("candles", [])
-        return [
-            CandleBar(
-                timestamp=int(row[0]),
-                open=float(row[1]),
-                high=float(row[2]),
-                low=float(row[3]),
-                close=float(row[4]),
-                volume=float(row[5]),
-            )
-            for row in candles_raw
-            if len(row) >= 6
-        ]
+        while chunk_start < end_dt:
+            chunk_end = min(chunk_start + timedelta(days=CHUNK_DAYS), end_dt)
+            from_date = chunk_start.strftime("%Y-%m-%d")
+            to_date = chunk_end.strftime("%Y-%m-%d")
+            try:
+                resp = self._get(
+                    f"{self.DATA_URL}/history",
+                    params={
+                        "symbol": normalized_symbol,
+                        "resolution": resolution,
+                        "date_format": "1",
+                        "range_from": from_date,
+                        "range_to": to_date,
+                        "cont_flag": "1",
+                    },
+                )
+                candles_raw = resp.get("candles", [])
+                all_candles.extend([
+                    CandleBar(
+                        timestamp=int(row[0]),
+                        open=float(row[1]),
+                        high=float(row[2]),
+                        low=float(row[3]),
+                        close=float(row[4]),
+                        volume=float(row[5]),
+                    )
+                    for row in candles_raw
+                    if len(row) >= 6
+                ])
+                _log.info("Fyers chunk | %s | %s to %s | bars=%d", normalized_symbol, from_date, to_date, len(candles_raw))
+            except Exception as e:
+                _log.warning("Fyers chunk error | %s | %s to %s | %s", symbol, from_date, to_date, e)
+            chunk_start = chunk_end + timedelta(days=1)
 
+        seen = set()
+        unique = []
+        for c in sorted(all_candles, key=lambda x: x.timestamp):
+            if c.timestamp not in seen:
+                seen.add(c.timestamp)
+                unique.append(c)
+        _log.info("Fyers candles total | %s | bars=%d", normalized_symbol, len(unique))
+        return unique
     def refresh_token(self) -> Dict:
         """Fyers token refresh using refresh_token from credentials."""
         refresh_tok = self.credentials.get("refresh_token", "")
@@ -438,3 +459,64 @@ class FyersAdapter(BaseBrokerAdapter):
             return {"success": False, "message": data.get("message", "Refresh failed")}
         except Exception as e:
             return {"success": False, "message": str(e)}
+    def place_gtt(
+        self,
+        symbol: str,
+        qty: int,
+        side: str,           # "buy" or "sell"
+        trigger_price: float,
+        limit_price: float,
+        product_type: str = "INTRADAY",
+    ) -> dict:
+        """
+        GTT (Good Till Triggered) order place karo.
+        SL ya Target ke liye use karo.
+        """
+        payload = {
+            "symbol": symbol,
+            "qty": qty,
+            "side": 1 if side == "buy" else -1,
+            "type": 1,  # Limit order
+            "limitPrice": limit_price,
+            "stopPrice": trigger_price,
+            "productType": product_type,
+            "validity": "GTT",
+            "disclosedQty": 0,
+            "offlineOrder": False,
+        }
+        try:
+            resp = self._post(f"{self.BASE_URL}/api/v3/orders/gtt", payload)
+            return resp
+        except Exception as e:
+            return {"s": "error", "message": str(e)}
+
+    def place_gtt(
+        self,
+        symbol: str,
+        qty: int,
+        side: str,           # "buy" or "sell"
+        trigger_price: float,
+        limit_price: float,
+        product_type: str = "INTRADAY",
+    ) -> dict:
+        """
+        GTT (Good Till Triggered) order place karo.
+        SL ya Target ke liye use karo.
+        """
+        payload = {
+            "symbol": symbol,
+            "qty": qty,
+            "side": 1 if side == "buy" else -1,
+            "type": 1,  # Limit order
+            "limitPrice": limit_price,
+            "stopPrice": trigger_price,
+            "productType": product_type,
+            "validity": "GTT",
+            "disclosedQty": 0,
+            "offlineOrder": False,
+        }
+        try:
+            resp = self._post(f"{self.BASE_URL}/api/v3/orders/gtt", payload)
+            return resp
+        except Exception as e:
+            return {"s": "error", "message": str(e)}

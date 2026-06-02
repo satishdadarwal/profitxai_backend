@@ -9,7 +9,7 @@ from celery import shared_task
 logger = logging.getLogger(__name__)
 
 
-@shared_task(bind=True, max_retries=1, time_limit=600, soft_time_limit=550)
+@shared_task(bind=True, max_retries=1, time_limit=1800, soft_time_limit=1700)
 def run_backtest_task(self, run_id: str):
     from .engine import _REGISTRY, BacktestEngine, get_strategy
     from .models import BacktestRun

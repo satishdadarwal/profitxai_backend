@@ -173,9 +173,9 @@ class PaperAccount(models.Model):
         """Get tier-based max position size per asset type"""
         limits = {
             "tier_1": {
-                "crypto":   Decimal('30000'),
-                "option":   Decimal('30000'),
-                "futures":  Decimal('40000'),
+                "crypto":   Decimal('50000'),
+                "option":   Decimal('50000'),
+                "futures":  Decimal('100000'),
             },
             "tier_2": {
                 "crypto":   Decimal('100000'),

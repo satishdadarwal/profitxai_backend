@@ -38,7 +38,11 @@ class BrokerAccountAdmin(admin.ModelAdmin):
             "fields": ("user", "broker", "label", "is_active", "is_verified"),
         }),
         ("Fyers Credentials", {
-            "fields": ("app_id", "secret_key", "redirect_uri"),
+            "fields": ("app_id", "secret_key", "redirect_uri", "fyers_client_id"),
+        }),
+        ("Dhan Credentials", {
+            "fields": ("dhan_client_id", "dhan_access_token"),
+            "description": "Dhan Client ID aur Access Token (24hr validity — roz refresh karo)",
         }),
         ("Tokens", {
             "fields": ("token_preview", "refresh_token", "token_expiry"),
@@ -65,24 +69,20 @@ class BrokerAccountAdmin(admin.ModelAdmin):
     # ── List display helpers ──────────────────────────────────
 
     def token_status(self, obj):
-        # Delta = API key based, no access_token needed
+        # Delta = API key based
         if obj.broker == "delta":
-            has_key = bool(obj.api_key)
-            if has_key:
-                return format_html(
-                    '<span style="color:green;font-weight:bold">✅ API Key Set</span>'
-                )
-            return format_html(
-                '<span style="color:red;font-weight:bold">❌ No API Key</span>'
-            )
-        # Fyers / others = token based
+            if bool(obj.api_key):
+                return format_html('<span style="color:green;font-weight:bold">✅ API Key Set</span>')
+            return format_html('<span style="color:red;font-weight:bold">❌ No API Key</span>')
+        # Dhan = dhan_access_token based
+        if obj.broker == "dhan":
+            if bool(obj.dhan_access_token):
+                return format_html('<span style="color:green;font-weight:bold">✅ Token Set</span>')
+            return format_html('<span style="color:red;font-weight:bold">❌ No Token</span>')
+        # Fyers / others = access_token based
         if obj.access_token:
-            return format_html(
-                '<span style="color:green;font-weight:bold">✅ Token Set</span>'
-            )
-        return format_html(
-            '<span style="color:red;font-weight:bold">❌ No Token</span>'
-        )
+            return format_html('<span style="color:green;font-weight:bold">✅ Token Set</span>')
+        return format_html('<span style="color:red;font-weight:bold">❌ No Token</span>')
     token_status.short_description = "Token"
 
     def fyers_login_button(self, obj):
@@ -290,7 +290,9 @@ class BrokerAccountAdmin(admin.ModelAdmin):
         if account.label in ("Master Account", "fyers masters"):
             state_param = "master_setup"
         else:
-            state_param = f"{account.user.id}__{account.pk}"
+            import base64 as _b64
+            _raw = f"{account.user.id}:{account.pk}"
+            state_param = _b64.urlsafe_b64encode(_raw.encode()).decode().rstrip("=")
 
         from urllib.parse import quote
         import logging

@@ -342,7 +342,11 @@ class FyersExecutionAdapter(ExecutionAdapter):
     Live mode — Fyers pe actual order place karta hai.
     """
 
-    def __init__(self, user):
+    def __init__(self, user, instrument_type: str = "futures", trader_type: str = "buyer", sl_pct: float = 20, tp_pct: float = 40):
+        self.instrument_type = instrument_type
+        self.trader_type = trader_type
+        self._sl_pct = sl_pct
+        self._tp_pct = tp_pct
         self.user = user
 
     async def place_order(self, order) -> str:
@@ -372,21 +376,162 @@ class FyersExecutionAdapter(ExecutionAdapter):
             )
 
             from apps.brokers.symbol_mapper import normalize_for_fyers
-            fyers_sym = normalize_for_fyers(order.symbol)
+            from apps.strategies.fyers_utils import get_atm_option_symbol
+            # Options ke liye ATM symbol generate karo
+            instr_type = self.instrument_type
+            if instr_type == "options":
+                direction = order.direction.value  # "long" or "short"
+                trader_type = self.trader_type  # "buyer" or "seller"
+                if trader_type == "buyer":
+                    # Buyer: Bearish→PE Buy, Bullish→CE Buy
+                    option_type = "CE" if direction == "long" else "PE"
+                    side = 1  # Always BUY
+                else:
+                    # Seller: Bearish→CE Sell, Bullish→PE Sell
+                    option_type = "PE" if direction == "long" else "CE"
+                    side = -1  # Always SELL
+                fyers_sym = get_atm_option_symbol(
+                    symbol=order.symbol,
+                    current_price=float(order.price),
+                    option_type=option_type,
+                    user=self.user,
+                )
+                logger.info("Options symbol=%s | direction=%s | trader=%s | side=%s",
+                    fyers_sym, direction, trader_type, "BUY" if side == 1 else "SELL")
+            # ── Options: place_live_option_trade() use karo ──────────────
+            if instr_type == "options" and side == 1:
+                try:
+                    from apps.options.services import place_live_option_trade
+                    base_sym = order.symbol.upper().replace("NSE:", "").replace("BSE:", "")
+                    spot_price = float(order.price) if order.price else 0
+                    sl_price = round(spot_price * (1 - self._sl_pct / 100), 2)
+                    tp_price = round(spot_price * (1 + self._tp_pct / 100), 2)
+                    result = place_live_option_trade(
+                        user=self.user,
+                        symbol_name=base_sym,
+                        option_type=option_type,
+                        action="buy",
+                        lots=1,
+                        spot=spot_price,
+                        entry_price=spot_price,
+                        stop_loss=sl_price,
+                        target_price=tp_price,
+                        setup_type=f"ICT-Auto",
+                        timeframe="15",
+                        strategy=None,
+                    )
+                    broker_id = result.get("broker_order_id", "unknown")
+                    logger.info("place_live_option_trade result: %s", result)
+                    return str(broker_id)
+                except Exception as live_err:
+                    logger.error("place_live_option_trade error: %s", live_err)
+            else:
+                fyers_sym = normalize_for_fyers(order.symbol)
+                side = 1 if order.direction.value == "long" else -1
 
+            LOT_SIZES = {
+                "NIFTY": 75, "BANKNIFTY": 30, "FINNIFTY": 65,
+                "MIDCPNIFTY": 120, "SENSEX": 20, "BANKEX": 20,
+            }
+            base_sym = order.symbol.upper().replace("NSE:", "").replace("BSE:", "")
+            lot_size = LOT_SIZES.get(base_sym, 1)
+            qty = lot_size  # 1 lot
+            logger.info("Options qty | lot_size=%d | symbol=%s", lot_size, base_sym)
             _order_params = {
                 "symbol": fyers_sym,
-                "qty": int(order.size),
+                "qty": qty,
                 "type": 2,
-                "side": 1 if order.direction.value == "long" else -1,
+                "side": side,
                 "productType": "INTRADAY",
                 "validity": "DAY",
-                "stopLoss": order.stop_loss,
-                "takeProfit": order.take_profit,
+                "offlineOrder": False,
+                "stopLoss": 0,
+                "takeProfit": 0,
             }
             result = cast(dict, fyers.place_order(data=_order_params))
-            broker_id = result.get("id", "unknown")
-            logger.info("Live order placed | broker_id=%s", broker_id)
+            broker_id = result.get("id") or result.get("orderNumber") or result.get("order_id", "unknown")
+            logger.info("Live order placed | broker_id=%s | full_result=%s", broker_id, result)
+
+            # ── Duplicate Check — same symbol ka open order hai? ────────
+            try:
+                from fyers_apiv3 import fyersModel as _fm
+                _fyers_check = _fm.FyersModel(
+                    client_id=account.app_id,
+                    token=account.access_token,
+                    log_path="", is_async=False,
+                )
+                positions = _fyers_check.positions()
+                open_syms = [
+                    p.get("symbol", "") 
+                    for p in positions.get("netPositions", [])
+                    if p.get("netQty", 0) != 0
+                ]
+                if fyers_sym in open_syms:
+                    logger.warning("Duplicate skip | %s already open", fyers_sym)
+                    return "duplicate_skipped"
+            except Exception as dup_err:
+                logger.warning("Duplicate check error: %s", dup_err)
+
+            # ── Margin Check — enough balance hai? ───────────────────────
+            try:
+                funds = _fyers_check.funds()
+                available = float(funds.get("fund_limit", [{}])[0].get("equityAmount", 0))
+                # Options buying mein margin = premium × qty × 1.1 (10% buffer)
+                required = float(order.price or 0) * qty * 1.1
+                if required > 0 and available < required:
+                    logger.warning(
+                        "Margin insufficient | required=%.2f | available=%.2f | skipping",
+                        required, available
+                    )
+                    return "margin_insufficient"
+            except Exception as margin_err:
+                logger.warning("Margin check error: %s", margin_err)
+
+            # ── GTT SL/Target order lagao ────────────────────────────────
+            if broker_id and broker_id != "unknown" and instr_type == "options":
+                try:
+                    entry_price = float(order.price) if order.price else 0
+                    sl_pct = float(getattr(self, '_sl_pct', 20)) / 100
+                    tp_pct = float(getattr(self, '_tp_pct', 40)) / 100
+
+                    if entry_price > 0:
+                        sl_price = round(entry_price * (1 - sl_pct), 2)
+                        tp_price = round(entry_price * (1 + tp_pct), 2)
+
+                        # SL GTT
+                        gtt_sl = fyers.place_order(data={
+                            "symbol": fyers_sym,
+                            "qty": qty,
+                            "type": 3,      # SL order
+                            "side": -1,     # Sell
+                            "productType": "INTRADAY",
+                            "validity": "DAY",
+                            "stopPrice": sl_price,
+                            "limitPrice": round(sl_price * 0.98, 2),
+                            "offlineOrder": False,
+                            "stopLoss": 0,
+                            "takeProfit": 0,
+                        })
+                        logger.info("SL order placed | price=%.2f | result=%s", sl_price, gtt_sl)
+
+                        # Target GTT
+                        gtt_tp = fyers.place_order(data={
+                            "symbol": fyers_sym,
+                            "qty": qty,
+                            "type": 1,      # Limit order
+                            "side": -1,     # Sell
+                            "productType": "INTRADAY",
+                            "validity": "DAY",
+                            "stopPrice": 0,
+                            "limitPrice": tp_price,
+                            "offlineOrder": False,
+                            "stopLoss": 0,
+                            "takeProfit": 0,
+                        })
+                        logger.info("Target order placed | price=%.2f | result=%s", tp_price, gtt_tp)
+                except Exception as gtt_err:
+                    logger.error("GTT order error: %s", gtt_err)
+
             return str(broker_id)
         except Exception as e:
             logger.error("FyersExecutionAdapter.place_order error: %s", e)
@@ -582,7 +727,13 @@ def execute_cycle_ict(strategy, symbol: str) -> dict:
                 )
                 return _null_signal(symbol)
 
-            executor = FyersExecutionAdapter(user=strategy.user)
+            executor = FyersExecutionAdapter(
+                user=strategy.user,
+                instrument_type=getattr(strategy, "instrument_type", "futures"),
+                trader_type=strategy.risk_config.get("trader_type", "buyer"),
+                sl_pct=strategy.risk_config.get("sl_pct", 20),
+                tp_pct=strategy.risk_config.get("target_pct", 40),
+            )
     else:
         executor = PaperExecutionAdapter()
 
@@ -627,7 +778,7 @@ def execute_cycle_ict(strategy, symbol: str) -> dict:
             entry  = float(sig.entry_price)
             sl     = sig.stop_loss    or round(entry * 0.99, 2)
             tp     = sig.take_profit_1 or round(entry * 1.02, 2)
-            size   = sig.position_size or 1
+            size   = 1  # Paper mode mein sirf 1 lot — position_size margin exceed karta hai
 
             # instrument_type detect karo
             instr = getattr(strategy, "instrument_type", "crypto")

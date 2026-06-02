@@ -126,7 +126,7 @@ DATABASES = {
         "HOST": os.getenv("DB_HOST", "localhost"),
         "PORT": os.getenv("DB_PORT", "5432"),
         # ✅ UPDATED: Increased connection pooling for better performance
-        "CONN_MAX_AGE": 600,  # 10 minutes (was 60)
+        "CONN_MAX_AGE": 60,  # 10 minutes (was 60)
         "OPTIONS": {
             "connect_timeout": 10,
             # ✅ Additional optimizations
@@ -269,7 +269,7 @@ CHANNEL_LAYERS = {
     "default": {
         "BACKEND": "channels_redis.core.RedisChannelLayer",
         "CONFIG": {
-            "hosts": [("127.0.0.1", 6379)],
+            "hosts": [os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")],
             # Global capacity — total messages in Redis per channel
             "capacity": 2000,
             "expiry": 60,

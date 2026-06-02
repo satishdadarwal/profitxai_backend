@@ -434,6 +434,16 @@ def _fetch_from_delta(symbol, timeframe, from_ts, to_ts):
             "ADA-USDT": "ADAUSD",
             "DOGE-USDT": "DOGEUSD",
             "AVAX-USDT": "AVAXUSD",
+            "BTCUSDT": "BTCUSD",
+            "ETHUSDT": "ETHUSD",
+            "SOLUSDT": "SOLUSD",
+            "BNBUSDT": "BNBUSD",
+            "XRPUSDT": "XRPUSD",
+            "ADAUSDT": "ADAUSD",
+            "DOGEUSDT": "DOGEUSD",
+            "AVAXUSDT": "AVAXUSD",
+            "BTCUSD": "BTCUSD",
+            "ETHUSD": "ETHUSD",
         }
         delta_sym = _delta_sym_map.get(clean)
         if not delta_sym:

@@ -488,27 +488,31 @@ class BacktestEngine:
 
         fake_strat = _FakeStrategy()
 
-        for i in range(warmup, len(df)):
-            window = df.iloc[: i + 1]
-            price = Decimal(str(float(df["close"].iloc[i])))
+        # O(n) fix — incremental candles cache
+        candles_cache = []
+        for ts_idx, row in df.iloc[:warmup].iterrows():
+            candles_cache.append({
+                "ts": int(ts_idx.timestamp()) if hasattr(ts_idx, "timestamp") else 0,
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"]),
+                "volume": float(row.get("volume", 0)),
+            })
 
-            # Convert window to list of dicts for algo
-            candles = []
-            for ts_idx, row in window.iterrows():
-                candles.append(
-                    {
-                        "ts": (
-                            int(ts_idx.timestamp())
-                            if hasattr(ts_idx, "timestamp")
-                            else 0
-                        ),
-                        "open": float(row["open"]),
-                        "high": float(row["high"]),
-                        "low": float(row["low"]),
-                        "close": float(row["close"]),
-                        "volume": float(row.get("volume", 0)),
-                    }
-                )
+        for i in range(warmup, len(df)):
+            ts_idx = df.index[i]
+            row = df.iloc[i]
+            candles_cache.append({
+                "ts": int(ts_idx.timestamp()) if hasattr(ts_idx, "timestamp") else 0,
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"]),
+                "volume": float(row.get("volume", 0)),
+            })
+            price = Decimal(str(float(row["close"])))
+            candles = list(candles_cache)
 
             try:
                 signal = self.strategy.generate_signal(
