@@ -813,7 +813,10 @@ def execute_cycle_ict(strategy, symbol: str) -> dict:
                 "strategy_id":     str(strategy.id),
             }
 
-            paper_order = open_trade(strategy.user, trade_data)
+            # #BUG-FIX: strategy.user = creator hota hai (Satish)
+            # Global strategy mein subscriber ka user use karo
+            _trade_user = getattr(strategy, "_subscriber_user", None) or strategy.user
+            paper_order = open_trade(_trade_user, trade_data)
             logger.info(
                 "✅ Paper trade created | id=%s | symbol=%s | side=%s | entry=%.4f | "
                 "sl=%.4f | tp=%.4f | strategy=%s",

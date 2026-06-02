@@ -521,8 +521,8 @@ def _build_day_data(user, date, label, include_grade_accuracy: bool) -> dict:
     ).select_related("live_signal")
 
     executed  = positions_qs.count()
-    wins      = positions_qs.filter(outcome="win").count()
-    losses    = positions_qs.filter(outcome="loss").count()
+    wins      = positions_qs.filter(status="closed", realized_pnl__gt=0).count()
+    losses    = positions_qs.filter(status="closed", realized_pnl__lt=0).count()
     win_rate  = round(wins / executed * 100, 1) if executed else 0
     total_pnl = float(positions_qs.aggregate(s=Sum("realized_pnl"))["s"] or 0)
 
@@ -564,8 +564,8 @@ def _build_summary(user, days: int, include_grade_accuracy: bool) -> dict:
     ).select_related("live_signal")
 
     executed  = positions_qs.count()
-    wins      = positions_qs.filter(outcome="win").count()
-    losses    = positions_qs.filter(outcome="loss").count()
+    wins      = positions_qs.filter(status="closed", realized_pnl__gt=0).count()
+    losses    = positions_qs.filter(status="closed", realized_pnl__lt=0).count()
     win_rate  = round(wins / executed * 100, 1) if executed else 0
     total_pnl = float(positions_qs.aggregate(s=Sum("realized_pnl"))["s"] or 0)
 
@@ -608,7 +608,7 @@ def _position_to_dict(pos) -> dict:
     risk_per_unit = abs(entry - sl) if sl else 1
     rr_achieved   = round(abs(exit_p - entry) / risk_per_unit, 1) if risk_per_unit else 0
 
-    outcome = pos.outcome or ""
+    outcome = "win" if (pos.realized_pnl or 0) > 0 else "loss" if (pos.realized_pnl or 0) < 0 else "be"
 
     return {
         "symbol":      pos.live_signal.symbol    if pos.live_signal else "—",
@@ -635,7 +635,7 @@ def _grade_accuracy(positions_qs) -> dict:
     for grade in ["A+", "A", "B"]:
         grade_qs = positions_qs.filter(live_signal__raw_payload__grade=grade)
         count    = grade_qs.count()
-        wins     = grade_qs.filter(outcome="win").count()
+        wins     = grade_qs.filter(status="closed", realized_pnl__gt=0).count()
         result[grade] = {
             "count":    count,
             "wins":     wins,

@@ -61,6 +61,12 @@ def on_price_tick(symbol: str, ltp: float, extra_data: dict = None):
 
         _update_ltp_cache(symbol, ltp)
         _update_position_pnl(symbol, ltp)
+        try:
+            from decimal import Decimal as _D
+            from apps.paper_trading.models import PaperTrade, normalize_symbol
+            PaperTrade.objects.filter(symbol=normalize_symbol(symbol), status="open").update(current_price=_D(str(ltp)))
+        except Exception as _pe:
+            logger.error("PaperTrade tick | %s | %s", symbol, _pe)
 
     except Exception as e:
         logger.error("on_price_tick error | symbol=%s | %s", symbol, e)

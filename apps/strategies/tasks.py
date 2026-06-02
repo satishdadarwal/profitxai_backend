@@ -210,7 +210,14 @@ def _run_global_strategy_per_subscriber(task_self, strategy_id: str, strategy):
 
     User = get_user_model()
     creator_id = strategy.user.pk if strategy.user else None
-    strategy_broker_slug = getattr(strategy.broker, "broker", "fyers") if strategy.broker else "fyers"
+    # #BUG-FIX: strategy.broker=NULL — instrument_type se broker slug determine karo
+    # perp/crypto → delta | options/futures/equity → fyers
+    if strategy.broker:
+        strategy_broker_slug = strategy.broker.broker
+    elif strategy.instrument_type in ('perp', 'crypto'):
+        strategy_broker_slug = 'delta'
+    else:
+        strategy_broker_slug = 'fyers'
 
     # ── Sirf woh subscribers jinhone strategy start ki hai ────────
     running_prefs = UserStrategyPreference.objects.filter(
@@ -275,6 +282,7 @@ def _run_global_strategy_per_subscriber(task_self, strategy_id: str, strategy):
         subscriber_strategy = copy.copy(strategy)
         subscriber_strategy.user = subscriber
         subscriber_strategy.broker = subscriber_account
+        subscriber_strategy._subscriber_user = subscriber
 
         # Preferred mode apply karo
         if pref.preferred_mode and pref.preferred_mode != subscriber_strategy.mode:

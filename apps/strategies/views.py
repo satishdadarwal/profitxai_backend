@@ -137,25 +137,33 @@ class StrategyListCreateView(StrategyOwnerMixin, APIView):
         # Apni strategies
         own_q = Q(user=user, is_active=True)
 
-        # Global strategies — plan ke hisaab se filter karo
-        if user.plan and user.plan != "free":
-            # Paid user: allowed_plans empty (sab) OR user plan match kare
-            global_q = Q(
-                is_global=True,
-                is_active=True,
-            ) & (
-                Q(allowed_plans=[]) |
-                Q(allowed_plans__contains=[user.plan])
-            )
+        # #BUG-FIX: user.plan lowercase 'elite' vs DB 'Elite' — case mismatch fix
+        plan_val = getattr(user, 'plan', None) or 'free'
+        if plan_val != 'free':
+            plan_variants = list({plan_val, plan_val.capitalize(), plan_val.upper()})
+            plan_q = Q(allowed_plans=[])
+            for v in plan_variants:
+                plan_q |= Q(allowed_plans__contains=[v])
+            global_q = Q(is_global=True, is_active=True) & plan_q
         else:
-            # Free user: sirf woh global jahan allowed_plans empty ho
-            global_q = Q(
-                is_global=True,
-                is_active=True,
-                allowed_plans=[],
-            )
+            global_q = Q(is_global=True, is_active=True, allowed_plans=[])
 
         qs = Strategy.objects.filter(own_q | global_q).select_related("broker").distinct()
+
+        # #NEW: Broker-based instrument filter
+        # Fyers/Zerodha/Dhan → perp/crypto exclude
+        # Delta/Binance → options/futures/equity exclude
+        # Dono hain → sab dikhao
+        from apps.brokers.models import BrokerAccount
+        user_brokers = set(BrokerAccount.objects.filter(user=user, is_active=True).values_list('broker', flat=True))
+        indian = {'fyers','zerodha','dhan','upstox','angel','iifl'}
+        crypto = {'delta','binance','bybit'}
+        has_indian = bool(user_brokers & indian)
+        has_crypto = bool(user_brokers & crypto)
+        if has_indian and not has_crypto:
+            qs = qs.exclude(instrument_type__in=['perp','crypto'])
+        elif has_crypto and not has_indian:
+            qs = qs.exclude(instrument_type__in=['options','futures','equity'])
 
         if state := request.query_params.get("state"):
             qs = qs.filter(state=state)
@@ -667,6 +675,9 @@ class StrategyActivityLogView(APIView):
 
     def get(self, request):
         date_filter = request.GET.get("date_filter", "all")
+        # #NEW: mode_filter — live screen sirf live trades dekhna chahti hai
+        # paper screen sirf paper. None = sab dikhao (backward compatible)
+        mode_filter = request.GET.get("mode_filter", None)  # "live" | "paper" | None
 
         today_start = None
         if date_filter == "today":
@@ -678,13 +689,11 @@ class StrategyActivityLogView(APIView):
         # Pehle sirf user=request.user tha — global strategies
         # algo_trading_screen pe nahi dikhti thi
         user = request.user
+        # #BUG-FIX: plan case mismatch fix + broker filter
         plan_val = getattr(user, 'plan', 'free') or 'free'
-
         own_q = Q(user=user)
-
         if plan_val != 'free':
-            plan_name = plan_val.capitalize()
-            plan_variants = list({plan_val, plan_name, plan_val.upper()})
+            plan_variants = list({plan_val, plan_val.capitalize(), plan_val.upper()})
             plan_q = Q(allowed_plans=[])
             for variant in plan_variants:
                 plan_q |= Q(allowed_plans__contains=[variant])
@@ -692,9 +701,18 @@ class StrategyActivityLogView(APIView):
         else:
             global_q = Q(is_global=True, allowed_plans=[])
 
-        strategies = Strategy.objects.filter(
-            own_q | global_q
-        ).order_by("-created_at").distinct()
+        strategies_qs = Strategy.objects.filter(own_q | global_q).order_by("-created_at").distinct()
+
+        from apps.brokers.models import BrokerAccount as _BA
+        _ub = set(_BA.objects.filter(user=user, is_active=True).values_list('broker', flat=True))
+        _ind = {'fyers','zerodha','dhan','upstox','angel','iifl'}
+        _cry = {'delta','binance','bybit'}
+        if bool(_ub & _ind) and not bool(_ub & _cry):
+            strategies_qs = strategies_qs.exclude(instrument_type__in=['perp','crypto'])
+        elif bool(_ub & _cry) and not bool(_ub & _ind):
+            strategies_qs = strategies_qs.exclude(instrument_type__in=['options','futures','equity'])
+
+        strategies = list(strategies_qs)
 
         activity_data = []
         total_realized = 0.0
@@ -716,6 +734,10 @@ class StrategyActivityLogView(APIView):
                 effective_mode = pref.preferred_mode
             except UserStrategyPreference.DoesNotExist:
                 effective_mode = strategy.mode
+
+            # #FIX: mode_filter se paper/live alag karo
+            if mode_filter and effective_mode != mode_filter:
+                continue
 
             if effective_mode == "paper":
                 # ✅ FIX: account__user se user filter karo

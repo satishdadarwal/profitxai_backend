@@ -80,6 +80,7 @@ class GradedSignal:
     timeframes: list = field(default_factory=list)
     breakdown: dict = field(default_factory=dict)
     notes: str = ""
+    market_type: str = "indian"  # 'indian' | 'crypto'
 
     # Computed
     @property
@@ -120,6 +121,7 @@ class GradedSignal:
             "breakdown": self.breakdown,
             "notes": self.notes,
             "grade_emoji": self.grade_emoji,
+            "market_type": self.market_type,
         }
 
     def summary(self) -> str:
@@ -573,6 +575,7 @@ class ICTScreener:
     """
 
     SYMBOLS = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]
+    CRYPTO_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"]
 
     TF_CONFIG = {
         "timeframes": ["1D", "1H", "15m"],
@@ -613,23 +616,34 @@ class ICTScreener:
         """
         Sabhi symbols scan karo — best graded signals return karo.
         """
+        # Indian market time check (crypto 24x7 chal sakta hai)
         if not self.is_market_time():
-            logger.info("ICTScreener: Market closed — skipping scan")
-            return []
+            logger.info("ICTScreener: Indian market closed — crypto only scan")
+            # Sirf crypto scan karo
+            if symbols is None:
+                symbols = []  # Indian symbols skip
 
-        symbols = symbols or self.SYMBOLS
-
-        from apps.strategies.ict_integration import FyersDataProvider, _is_market_time
-
+        from apps.strategies.ict_integration import FyersDataProvider, DeltaDataProvider, _is_market_time
         from .ict import run_mtf_analysis
         from .runner import DataProvider
 
-        provider = FyersDataProvider(user=user, days_back=60)
+        # Indian symbols
+        indian_symbols = symbols or self.SYMBOLS
+        fyers_provider = FyersDataProvider(user=user, days_back=60)
 
-        results = await asyncio.gather(
-            *[self._scan_symbol(symbol, provider) for symbol in symbols],
+        # Crypto symbols (market time check bypass — 24x7)
+        crypto_provider = DeltaDataProvider()
+
+        indian_results = await asyncio.gather(
+            *[self._scan_symbol(sym, fyers_provider) for sym in indian_symbols],
             return_exceptions=True,
         )
+        crypto_results = await asyncio.gather(
+            *[self._scan_symbol(sym, crypto_provider, is_crypto=True) for sym in self.CRYPTO_SYMBOLS],
+            return_exceptions=True,
+        )
+        results = list(indian_results) + list(crypto_results)
+        symbols = indian_symbols + self.CRYPTO_SYMBOLS
 
         signals = []
         for sym, result in zip(symbols, results):
@@ -664,6 +678,7 @@ class ICTScreener:
         self,
         symbol: str,
         provider,
+        is_crypto: bool = False,
     ) -> Optional[GradedSignal]:
         """Single symbol ICT scan → GradedSignal."""
         from .ict import run_mtf_analysis
@@ -756,6 +771,7 @@ class ICTScreener:
             timeframes=list(mtf.snapshots.keys()),
             breakdown=confluence.breakdown,
             notes=notes,
+            market_type="crypto" if is_crypto else "indian",
         )
 
     def _calculate_levels(

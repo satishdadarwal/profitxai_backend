@@ -16,18 +16,38 @@ if TYPE_CHECKING:
 def normalize_symbol(symbol: str) -> str:
     """
     Normalize symbol by removing exchange prefixes
-    DELTA:BTC-USDT -> BTC-USDT
+    DELTA:BTC-USDT -> BTCUSD
+    BTC-USDT -> BTCUSD
     NSE:RELIANCE -> RELIANCE
     """
     if not symbol:
         return ""
-    return (
+    s = (
         symbol.replace("DELTA:", "")
         .replace("NSE:", "")
         .replace("BSE:", "")
         .strip()
         .upper()
     )
+    # #FIX: Delta crypto symbol normalize karo
+    # BTC-USDT → BTCUSD, ETH-USDT → ETHUSD etc.
+    _crypto_map = {
+        "BTC-USDT": "BTCUSD",
+        "ETH-USDT": "ETHUSD",
+        "SOL-USDT": "SOLUSD",
+        "BNB-USDT": "BNBUSD",
+        "XRP-USDT": "XRPUSD",
+        "DOGE-USDT": "DOGEUSD",
+        "ADA-USDT": "ADAUSD",
+    }
+    if s in _crypto_map:
+        return _crypto_map[s]
+    # Generic: remove dash and replace USDT→USD
+    if "-USDT" in s:
+        return s.replace("-USDT", "USD")
+    if "-USD" in s:
+        return s.replace("-USD", "USD")
+    return s
 
 
 # ─────────────────────────────────────────────

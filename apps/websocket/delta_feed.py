@@ -186,7 +186,7 @@ class DeltaFeedManager:
                             "symbol": normalized,
                             "ltp": float(ltp),
                             "change": float(data.get("change", 0)),
-                            "changePct": float(data.get("change_pct", 0)),
+                            "changePct": float(data.get("chg_pct", 0)),
                             "open": float(data.get("open", 0)),
                             "high": float(data.get("high", 0)),
                             "low": float(data.get("low", 0)),
@@ -201,6 +201,11 @@ class DeltaFeedManager:
                     self._broadcast("market", payload)
                     self._broadcast(symbol_group, payload)
                     self._publish_to_redis(payload["data"])
+                    try:
+                        from apps.brokers.feed_manager import on_price_tick
+                        on_price_tick(normalized, float(ltp))
+                    except Exception as _fe:
+                        pass
 
                     logger.info(
                         "Delta tick | %s | ltp=%.4f | group=%s",
