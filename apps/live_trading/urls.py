@@ -56,4 +56,5 @@ urlpatterns = [
     path("screener/scan/",        screener_views.screener_scan,        name="screener_scan"),
     path("screener/stats/",       screener_views.screener_stats,       name="screener_stats"),
     path("screener/performance/", screener_views.screener_performance, name="screener_performance"),
+    path("screener/preference/",   screener_views.screener_preference,   name="screener_preference"),
 ]

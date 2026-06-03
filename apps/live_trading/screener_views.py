@@ -724,3 +724,102 @@ def _record_scan(user, tier: int):
     ttl = int((midnight - now).total_seconds())
     cache.set(key, count, timeout=ttl)
     cache.set(_last_scan_key(user), now, timeout=86400)
+
+# ═════════════════════════════════════════════════════════════════
+#  5. GET/POST /api/live-trading/screener/preference/
+#     User ka screener execution preference
+# ═════════════════════════════════════════════════════════════════
+@api_view(["GET", "POST"])
+@permission_classes([IsAuthenticated])
+def screener_preference(request):
+    """
+    GET  → current preference return karo
+    POST → preference update karo
+    Body: {
+        "execution_mode": "auto" | "semi" | "manual",
+        "trading_mode":   "paper" | "live",
+        "options_enabled": true | false,
+        "crypto_enabled":  true | false,
+        "risk_pct":        1.0,
+        "leverage":        10
+    }
+    """
+    from apps.strategies.models import UserScreenerPreference
+
+    pref, _ = UserScreenerPreference.objects.get_or_create(
+        user=request.user,
+        defaults={
+            "execution_mode":  "semi",
+            "trading_mode":    "paper",
+            "options_enabled": True,
+            "crypto_enabled":  True,
+            "risk_pct":        1.0,
+            "leverage":        10,
+        },
+    )
+
+    if request.method == "GET":
+        return Response({
+            "success": True,
+            "preference": {
+                "execution_mode":  pref.execution_mode,
+                "trading_mode":    pref.trading_mode,
+                "options_enabled": pref.options_enabled,
+                "crypto_enabled":  pref.crypto_enabled,
+                "risk_pct":        pref.risk_pct,
+                "leverage":        pref.leverage,
+            },
+        })
+
+    # POST — update karo
+    data = request.data
+    allowed_exec  = {"auto", "semi", "manual"}
+    allowed_trade = {"paper", "live"}
+
+    if "execution_mode" in data:
+        if data["execution_mode"] not in allowed_exec:
+            return Response({"success": False, "error": "Invalid execution_mode"}, status=400)
+        pref.execution_mode = data["execution_mode"]
+
+    if "trading_mode" in data:
+        if data["trading_mode"] not in allowed_trade:
+            return Response({"success": False, "error": "Invalid trading_mode"}, status=400)
+        # Live mode sirf Elite plan ke liye
+        if data["trading_mode"] == "live":
+            from apps.live_trading.screener_views import _user_tier, _TIER_ELITE
+            if _user_tier(request.user) < _TIER_ELITE:
+                return Response({
+                    "success": False,
+                    "error": "live_mode_restricted",
+                    "message": "Live trading sirf Elite plan mein available hai.",
+                }, status=403)
+        pref.trading_mode = data["trading_mode"]
+
+    if "options_enabled" in data:
+        pref.options_enabled = bool(data["options_enabled"])
+
+    if "crypto_enabled" in data:
+        pref.crypto_enabled = bool(data["crypto_enabled"])
+
+    if "risk_pct" in data:
+        rp = float(data["risk_pct"])
+        pref.risk_pct = max(0.1, min(5.0, rp))  # 0.1% to 5% cap
+
+    if "leverage" in data:
+        lev = int(data["leverage"])
+        pref.leverage = max(1, min(20, lev))  # 1x to 20x cap
+
+    pref.save()
+
+    return Response({
+        "success": True,
+        "message": "Preference updated",
+        "preference": {
+            "execution_mode":  pref.execution_mode,
+            "trading_mode":    pref.trading_mode,
+            "options_enabled": pref.options_enabled,
+            "crypto_enabled":  pref.crypto_enabled,
+            "risk_pct":        pref.risk_pct,
+            "leverage":        pref.leverage,
+        },
+    })

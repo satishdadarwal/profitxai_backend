@@ -527,23 +527,43 @@ def _do_auto_refresh_fyers_tokens():
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _restart_master_feed(new_access_token: str, app_id: str):
-    from apps.websocket.fyers_feed import feed_manager
+    import os, json
     token_str = f"{app_id}:{new_access_token}"
+    if os.environ.get('CELERY_WORKER_RUNNING'):
+        try:
+            import redis as redis_lib
+            from django.conf import settings as _s
+            r = redis_lib.from_url(_s.REDIS_URL, decode_responses=True)
+            r.publish("feed:restart_token", json.dumps({"token": token_str}))
+            r.close()
+            logger.info("✅ Feed restart request published via Redis")
+        except Exception as e:
+            logger.error("Feed restart Redis publish failed: %s", e)
+        return
+    from apps.websocket.fyers_feed import feed_manager
     if feed_manager._started or feed_manager._connected:
         feed_manager.restart_with_new_token(token_str)
         logger.info("✅ Master feed restarted with new token")
     else:
         feed_manager.start(token=token_str)
         logger.info("✅ Master feed started fresh with new token")
-
-
 def _restart_ws_for_account(account_id: int, new_access_token: str, app_id: str):
-    from apps.websocket.fyers_feed import feed_manager as fyers_feed_manager
+    import os, json
     token_str = f"{app_id}:{new_access_token}"
+    if os.environ.get('CELERY_WORKER_RUNNING'):
+        try:
+            import redis as redis_lib
+            from django.conf import settings as _s
+            r = redis_lib.from_url(_s.REDIS_URL, decode_responses=True)
+            r.publish("feed:restart_token", json.dumps({"token": token_str}))
+            r.close()
+            logger.info("✅ WS restart request published via Redis | account=%s", account_id)
+        except Exception as e:
+            logger.error("WS restart Redis publish failed: %s", e)
+        return
+    from apps.websocket.fyers_feed import feed_manager as fyers_feed_manager
     fyers_feed_manager.restart_with_new_token(token_str)
     logger.info("✅ WS restarted | account=%s", account_id)
-
-
 def _send_urgent_admin_alert(message: str):
     """Admin ko urgent notification bhejo."""
     try:

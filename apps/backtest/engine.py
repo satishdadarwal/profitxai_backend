@@ -124,7 +124,9 @@ class EmaCrossoverAlgo(BaseAlgo):
     name = "ema_crossover"
 
     def generate_signal(self, symbol, price, strategy, **ctx) -> AlgoSignal:
-        candles = ctx.get("candles", [])
+        candles = (ctx.get("candles") or ctx.get("mtf") or ctx.get("ltf") or ctx.get("htf") or [])
+        if candles and hasattr(candles[0], "close"):
+            candles = [{"open": c.open, "high": c.high, "low": c.low, "close": c.close, "volume": c.volume, "ts": c.timestamp} for c in candles]
 
         if len(candles) < 25:
             return AlgoSignal(

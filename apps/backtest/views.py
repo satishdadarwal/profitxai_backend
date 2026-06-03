@@ -84,7 +84,7 @@ class BacktestRunView(APIView):
             return Response({"error": "end_date required"}, status=400)
 
         # ── Strategy registry check ───────────────────────────────
-        ict_strategies = ["ict_mtf", "ict_silver_bullet"]
+        ict_strategies = ["ict_mtf", "ict_silver_bullet", "ema_scalp"]
         if strategy_name not in _REGISTRY and strategy_name not in ict_strategies:
             return Response(
                 {"error": f"Available: {list(_REGISTRY.keys()) + ict_strategies}"},

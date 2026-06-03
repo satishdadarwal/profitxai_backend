@@ -209,6 +209,10 @@ class FyersFeedManager:
                     status='open'
                 ).values_list('symbol', flat=True).distinct()
                 for sym in open_symbols:
+                    # Crypto symbols skip karo — Fyers support nahi karta
+                    if "-USDT" in sym.upper() or "-USD" in sym.upper() or "USDT" in sym.upper():
+                        logger.info("FyersFeed: Pre-load skipping crypto: %s", sym)
+                        continue
                     self._subscribed.add(_to_fyers_symbol(sym))
                 if self._subscribed:
                     logger.info(
@@ -635,10 +639,35 @@ class FyersFeedManager:
             layer = self._get_channel_layer()
             if not layer:
                 return
-            async_to_sync(layer.group_send)(
-                group,
-                {"type": msg_type, "data": data},
-            )
+            import asyncio
+
+            # ✅ FIX: interpreter shutdown error avoid karne ke liye
+            # async_to_sync() background thread mein fail hota hai
+            # Solution: existing loop use karo, ya new loop mein run karo
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_closed():
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+
+            if loop.is_running():
+                # Daphne/ASGI loop already running — thread-safe submit
+                asyncio.run_coroutine_threadsafe(
+                    layer.group_send(group, {"type": msg_type, "data": data}),
+                    loop,
+                )
+            else:
+                loop.run_until_complete(
+                    layer.group_send(group, {"type": msg_type, "data": data})
+                )
+        except RuntimeError as e:
+            if "interpreter shutdown" in str(e) or "cannot schedule" in str(e):
+                pass  # Normal during shutdown — ignore silently
+            else:
+                logger.error("FyersFeed broadcast error [%s]: %s", group, e)
         except Exception as e:
             logger.error("FyersFeed broadcast error [%s]: %s", group, e)
 
@@ -747,6 +776,55 @@ class FyersFeedManager:
 
 # ── Global singleton ──────────────────────────────────────────
 feed_manager = FyersFeedManager()
+
+
+# ── Redis feed:subscribe listener (sirf web/daphne process mein) ──
+def _start_feed_subscribe_listener():
+    """
+    Redis 'feed:subscribe' channel listen karo.
+    Celery workers yahan publish karte hain — hum yahan subscribe karte hain.
+    Sirf web process mein start hona chahiye (DJANGO_SETTINGS_MODULE check).
+    """
+    import os
+    # Celery workers mein ye thread start mat karo
+    if os.environ.get('CELERY_WORKER_RUNNING'):
+        return
+
+    def _listener():
+        import redis as redis_lib
+        from django.conf import settings as _settings
+        logger.info("FyersFeed: feed:subscribe Redis listener started ✅")
+        while True:
+            try:
+                r = redis_lib.from_url(_settings.REDIS_URL, decode_responses=True)
+                pubsub = r.pubsub()
+                pubsub.subscribe("feed:subscribe", "feed:restart_token")
+                for message in pubsub.listen():
+                    if message["type"] != "message":
+                        continue
+                    try:
+                        data = json.loads(message["data"])
+                        channel = message.get("channel", "feed:subscribe")
+                        if channel == "feed:restart_token":
+                            token = data.get("token")
+                            if token:
+                                logger.info("FyersFeed: Redis restart_token request received")
+                                feed_manager.restart_with_new_token(token)
+                        else:
+                            symbols = data.get("symbols", [])
+                            if symbols:
+                                logger.info(
+                                    "FyersFeed: Redis subscribe request | symbols=%s", symbols
+                                )
+                                feed_manager.subscribe_many(symbols)
+                    except Exception as e:
+                        logger.error("FyersFeed: feed:subscribe parse error: %s", e)
+            except Exception as e:
+                logger.error("FyersFeed: feed:subscribe listener crashed: %s — retrying in 5s", e)
+                time.sleep(5)
+
+    t = threading.Thread(target=_listener, daemon=True)
+    t.start()
 
 
 # ── Emergency token refresh helper ────────────────────────────

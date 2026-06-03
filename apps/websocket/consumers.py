@@ -166,7 +166,7 @@ class MarketConsumer(BaseConsumer):
         await super().connect()
         if not self.channel_layer:
             return
-        await self.channel_layer.group_add(self.MARKET_GROUP, self.channel_name)
+#        await self.channel_layer.group_add(self.MARKET_GROUP, self.channel_name)
         self.subscribed_symbols: set[str] = set()
 
         # ✅ FIX: Per-symbol task tracking instead of single global task
@@ -184,7 +184,7 @@ class MarketConsumer(BaseConsumer):
         await self._ensure_feed_started()
 
         # ✅ Redis subscriber task start karo
-        self._redis_task = asyncio.create_task(self._redis_subscriber())
+#        self._redis_task = asyncio.create_task(self._redis_subscriber())
 
         logger.info("MarketConsumer connected | user=%s", self.user.id)
 
@@ -207,12 +207,12 @@ class MarketConsumer(BaseConsumer):
             self._symbol_tasks.clear()
         
         # ✅ Cancel Redis subscriber
-        if hasattr(self, "_redis_task") and not self._redis_task.done():
-            self._redis_task.cancel()
-            try:
-                await asyncio.wait_for(self._redis_task, timeout=1.0)
-            except (asyncio.CancelledError, asyncio.TimeoutError):
-                pass
+ #       if hasattr(self, "_redis_task") and not self._redis_task.done():
+  #          self._redis_task.cancel()
+   #         try:
+    #            await asyncio.wait_for(self._redis_task, timeout=1.0)
+     #       except (asyncio.CancelledError, asyncio.TimeoutError):
+#                pass
 
         # Unsubscribe from symbols
         for symbol in list(getattr(self, "subscribed_symbols", [])):
@@ -587,8 +587,10 @@ class MarketConsumer(BaseConsumer):
         await self.send_json({"type": "symbol_update", **event["data"]})
 
     async def new_signal(self, event):
-        payload = {k: v for k, v in event.items() if k != "type"}
-        await self.send_json({"type": "new_signal", **payload})
+        data = event.get("data", {})
+        if not data:
+            data = {k: v for k, v in event.items() if k != "type"}
+        await self.send_json({"type": "new_signal", **data})
 
 
 # ─────────────────────────────────────────────────────────────
@@ -691,8 +693,10 @@ class TradeConsumer(BaseConsumer):
         await self.send_json({"type": "position_update", **event["data"]})
 
     async def new_signal(self, event):
-        payload = {k: v for k, v in event.items() if k != "type"}
-        await self.send_json({"type": "new_signal", **payload})
+        data = event.get("data", {})
+        if not data:
+            data = {k: v for k, v in event.items() if k != "type"}
+        await self.send_json({"type": "new_signal", **data})
 
     async def strategy_update(self, event):
         payload = event.get("payload") or event.get("strategy") or {}

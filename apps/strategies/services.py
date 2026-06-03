@@ -126,40 +126,38 @@ def start_strategy(strategy: Strategy, requested_by=None) -> Strategy:
     _validate_algo(strategy.algo_name)
     _register_beat_task(strategy)
 
-    # ✅ Auto-subscribe strategy symbols to Fyers feed
+    # ✅ Auto-subscribe strategy symbols — Redis publish (celery-safe)
+    # Fix: Celery workers mein feed_manager import karne se alag WS connection banta tha
+    # Solution: Redis feed:subscribe channel pe publish karo — sirf web process handle karega
     try:
-        from apps.websocket.fyers_feed import feed_manager
-
         symbols = []
-
         if getattr(strategy, "symbol", None):
             symbols.append(strategy.symbol)
-
         if hasattr(strategy, "symbols"):
             symbols_attr = strategy.symbols
             if hasattr(symbols_attr, "all"):
                 symbols.extend([s.symbol for s in symbols_attr.all()])
             elif isinstance(symbols_attr, list):
                 symbols.extend(symbols_attr)
-
         param_symbols = strategy.parameters.get("symbols", [])
         if isinstance(param_symbols, list):
             symbols.extend(param_symbols)
-
         unique_symbols = list(set(symbols))
-
         if unique_symbols:
+            import redis as redis_lib
+            from django.conf import settings as _settings
+            _r = redis_lib.from_url(_settings.REDIS_URL, decode_responses=True)
+            _r.publish("feed:subscribe", json.dumps({"symbols": unique_symbols}))
+            _r.close()
             logger.info(
-                "🔔 FyersFeed: Auto-subscribing %d symbols for strategy %s: %s",
-                len(unique_symbols), strategy.id, unique_symbols,
+                "🔔 FyersFeed: Subscribe published via Redis | strategy=%s | symbols=%s",
+                strategy.id, unique_symbols,
             )
-            feed_manager.subscribe_many(unique_symbols)
         else:
             logger.warning("⚠️ Strategy %s has no symbols to subscribe", strategy.id)
-
     except Exception as e:
         logger.error(
-            "❌ FyersFeed auto-subscribe failed for strategy %s: %s",
+            "❌ FyersFeed Redis publish failed for strategy %s: %s",
             strategy.id, e, exc_info=True,
         )
 
@@ -518,7 +516,7 @@ async def execute_cycle_async(strategy, symbol: Optional[str] = None) -> "AlgoSi
 
     try:
         # Market hours check
-        if not await database_sync_to_async(_is_market_time)():
+        if not await database_sync_to_async(_is_market_time)(target_symbol):
             return AlgoSignal(
                 signal_type="hold", symbol=target_symbol, price=Decimal("0"),
                 reason="Market closed", result="skipped",
@@ -721,7 +719,7 @@ def _execute_cycle_inner(strategy, target_symbol: str) -> "AlgoSignal":
         _save_signal(strategy, signal)
         return signal
 
-    if not _is_market_time():
+    if not _is_market_time(target_symbol):
         signal.result = "skipped"
         signal.reason = (signal.reason or "") + " [Outside market hours]"
         _save_signal(strategy, signal)
@@ -769,7 +767,7 @@ def _handle_ict_signal(
         _save_signal(strategy, signal)
         return signal
 
-    if not _is_market_time():
+    if not _is_market_time(target_symbol):
         signal.result = "skipped"
         signal.reason = (signal.reason or "") + " [Outside market hours]"
         _save_signal(strategy, signal)
@@ -822,7 +820,7 @@ async def _handle_ict_signal_async(
         await database_sync_to_async(_save_signal)(strategy, signal)
         return signal
 
-    if not await database_sync_to_async(_is_market_time)():
+    if not await database_sync_to_async(_is_market_time)(target_symbol):
         signal.result = "skipped"
         signal.reason = (signal.reason or "") + " [Outside market hours]"
         await database_sync_to_async(_save_signal)(strategy, signal)
@@ -914,12 +912,16 @@ def _validate_algo(algo_name: str):
         logger.warning("backtest.engine not available — skipping validation")
 
 
-def _is_market_time() -> bool:
+def _is_market_time(symbol: str = "") -> bool:
     """
     NSE market hours: Mon-Fri, 9:15 AM - 3:30 PM IST.
     Crypto (Delta): always open.
     Set SKIP_MARKET_HOURS_CHECK=True in settings to bypass (dev/testing).
     """
+    # ✅ Crypto 24/7 open hai
+    sym = symbol.upper()
+    if any(kw in sym for kw in ("-USDT", "BTC", "ETH", "SOL", "DELTA:", "CRYPTO")):
+        return True
     from django.conf import settings as _settings
     if getattr(_settings, "SKIP_MARKET_HOURS_CHECK", False):
         return True
@@ -948,7 +950,7 @@ def _save_signal(strategy: Strategy, signal: "AlgoSignal"):
             reason=signal.reason or "",
             metadata=signal.metadata or {},
             result=getattr(signal, "result", "skipped"),
-            order=getattr(signal, "order", None),
+            order=(getattr(signal, "order", None) if isinstance(getattr(signal, "order", None), __import__("apps.orders.models", fromlist=["Order"]).Order) else None),
         )
     except Exception as e:
         logger.error("Signal save failed | strategy=%s | err=%s", strategy.id, e)
@@ -963,16 +965,21 @@ def _push_signal_to_ws(strategy: Strategy, signal: "AlgoSignal"):
         if not layer:
             return
 
+        user_group = f"user_{strategy.user_id}"
         async_to_sync(layer.group_send)(
-            f"strategy_{strategy.id}",
+            user_group,
             {
-                "type": "signal_update",
-                "signal_type": signal.signal_type,
-                "symbol": signal.symbol,
-                "price": str(signal.price),
-                "reason": signal.reason or "",
-                "result": getattr(signal, "result", "skipped"),
-                "confidence": getattr(signal, "confidence", 0),
+                "type": "new_signal",
+                "data": {
+                    "signal_type": signal.signal_type,
+                    "symbol": signal.symbol,
+                    "price": str(signal.price),
+                    "reason": signal.reason or "",
+                    "result": getattr(signal, "result", "skipped"),
+                    "confidence": getattr(signal, "confidence", 0),
+                    "strategy": strategy.algo_name,
+                    "strategy_id": str(strategy.id),
+                },
             },
         )
     except Exception as e:

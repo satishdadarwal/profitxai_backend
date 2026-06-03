@@ -377,3 +377,54 @@ class UserStrategyPreference(models.Model):
     def effective_mode(self) -> str:
         """User ka mode — agar set nahi toh strategy ka master default."""
         return self.preferred_mode or self.strategy.mode
+
+# ─────────────────────────────────────────────────────────────────
+#  UserScreenerPreference — User ka screener signal execution mode
+#
+#  Screener ICT signals ke liye user choose karta hai:
+#  auto   → signal aate hi paper/live trade execute
+#  semi   → notification aata hai, user confirm kare 60s mein
+#  manual → sirf signal dikhao, user khud trade kare
+# ─────────────────────────────────────────────────────────────────
+class UserScreenerPreference(models.Model):
+
+    class ExecutionMode(models.TextChoices):
+        AUTO   = "auto",   "Auto (Immediate Execution)"
+        SEMI   = "semi",   "Semi (Alert + 60s Confirm)"
+        MANUAL = "manual", "Manual (Show Only)"
+
+    class TradingMode(models.TextChoices):
+        PAPER = "paper", "Paper Trading"
+        LIVE  = "live",  "Live Trading"
+
+    id   = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.OneToOneField(
+        User,
+        on_delete=models.CASCADE,
+        related_name="screener_preference",
+    )
+    execution_mode = models.CharField(
+        max_length=10,
+        choices=ExecutionMode.choices,
+        default=ExecutionMode.SEMI,
+        help_text="Signal aane pe kya karna hai",
+    )
+    trading_mode = models.CharField(
+        max_length=10,
+        choices=TradingMode.choices,
+        default=TradingMode.PAPER,
+        help_text="Paper ya live trade execute karo",
+    )
+    options_enabled = models.BooleanField(default=True)
+    crypto_enabled  = models.BooleanField(default=True)
+    risk_pct        = models.FloatField(default=1.0, help_text="Risk % per trade")
+    leverage        = models.IntegerField(default=10)
+    created_at      = models.DateTimeField(auto_now_add=True)
+    updated_at      = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "User Screener Preference"
+        verbose_name_plural = "User Screener Preferences"
+
+    def __str__(self):
+        return f"{self.user.email} | {self.execution_mode} | {self.trading_mode}"
