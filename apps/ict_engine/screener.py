@@ -599,14 +599,19 @@ class ICTScreener:
         self._sizer = PositionSizer()
 
     def is_market_time(self) -> bool:
-        from apps.strategies.ict_integration import _is_market_time
-
         try:
-            return _is_market_time()
+            import pytz
+            tz = pytz.timezone("Asia/Kolkata")
+            now = datetime.datetime.now(tz)
+            t = now.time()
+            # Monday=0, Sunday=6
+            if now.weekday() >= 5:
+                return False
+            return datetime.time(9, 15) <= t <= datetime.time(15, 30)
         except Exception:
             now = datetime.datetime.now()
             t = now.time()
-            return datetime.time(9, 30) <= t <= datetime.time(14, 30)
+            return datetime.time(9, 15) <= t <= datetime.time(15, 30)
 
     async def scan_all(
         self,
@@ -617,18 +622,19 @@ class ICTScreener:
         Sabhi symbols scan karo — best graded signals return karo.
         """
         # Indian market time check (crypto 24x7 chal sakta hai)
-        if not self.is_market_time():
+        market_open = self.is_market_time()
+        if not market_open:
             logger.info("ICTScreener: Indian market closed — crypto only scan")
             # Sirf crypto scan karo
             if symbols is None:
                 symbols = []  # Indian symbols skip
 
-        from apps.strategies.ict_integration import FyersDataProvider, DeltaDataProvider, _is_market_time
+        from apps.strategies.ict_integration import FyersDataProvider, DeltaDataProvider
         from .ict import run_mtf_analysis
         from .runner import DataProvider
 
         # Indian symbols
-        indian_symbols = symbols or self.SYMBOLS
+        indian_symbols = (symbols or self.SYMBOLS) if market_open else []
         fyers_provider = FyersDataProvider(user=user, days_back=60)
 
         # Crypto symbols (market time check bypass — 24x7)
@@ -928,6 +934,38 @@ def push_screener_signals(user, strategy=None):
     signals = run_screener_sync(user, strategy)
     if not signals:
         return
+
+    # DB mein save karo
+    try:
+        from apps.live_trading.models import LiveSignal, TradingSession
+        from decimal import Decimal
+        session, _ = TradingSession.objects.get_or_create(
+            user=user,
+            is_active=True,
+            defaults={"mode": "paper"},
+        )
+        for sig in signals:
+            LiveSignal.objects.get_or_create(
+                user=user,
+                symbol=sig["symbol"],
+                direction=sig["direction"],
+                entry_price=Decimal(str(sig["entry_price"])),
+                defaults=dict(
+                    session=session,
+                    signal_type=sig.get("setup_type", "ICT"),
+                    strength=min(100, int(sig.get("confluence", 60))),
+                    stop_loss=Decimal(str(sig["stop_loss"])),
+                    take_profit=Decimal(str(sig["take_profit_1"])),
+                    rr_ratio=Decimal(str(sig.get("risk_reward", 2.0))),
+                    lots=Decimal(str(sig.get("position_size", 1.0))),
+                    mode="paper",
+                    status="active",
+                    raw_payload=sig,
+                ),
+            )
+        logger.info("DB: %d signals saved", len(signals))
+    except Exception as db_err:
+        logger.error("DB save failed: %s", db_err)
 
     try:
         from asgiref.sync import async_to_sync
