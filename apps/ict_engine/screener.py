@@ -931,90 +931,13 @@ def run_screener_sync(user, strategy=None) -> list[dict]:
 
 
 def push_screener_signals(user, strategy=None):
+    """Pipeline pe delegate — no duplicate execution."""
     signals = run_screener_sync(user, strategy)
     if not signals:
         return
-
-    # DB mein save karo
     try:
-        from apps.live_trading.models import LiveSignal, TradingSession
-        from decimal import Decimal
-        session, _ = TradingSession.objects.get_or_create(
-            user=user,
-            is_active=True,
-            defaults={"mode": "paper"},
-        )
-        for sig in signals:
-            LiveSignal.objects.get_or_create(
-                user=user,
-                symbol=sig["symbol"],
-                direction=sig["direction"],
-                entry_price=Decimal(str(sig["entry_price"])),
-                defaults=dict(
-                    session=session,
-                    signal_type=sig.get("setup_type", "ICT"),
-                    strength=min(100, int(sig.get("confluence", 60))),
-                    stop_loss=Decimal(str(sig["stop_loss"])),
-                    take_profit=Decimal(str(sig["take_profit_1"])),
-                    rr_ratio=Decimal(str(sig.get("risk_reward", 2.0))),
-                    lots=Decimal(str(sig.get("position_size", 1.0))),
-                    mode="paper",
-                    status="active",
-                    raw_payload=sig,
-                ),
-            )
-        logger.info("DB: %d signals saved", len(signals))
-    except Exception as db_err:
-        logger.error("DB save failed: %s", db_err)
-
-    try:
-        from asgiref.sync import async_to_sync
-        from channels.layers import get_channel_layer
-
-        layer = get_channel_layer()
-        group_name = f"user_{user.id}"
-
-        CRYPTO_SYMBOLS = {"BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"}
-
-        for sig in signals:
-            symbol_upper = sig["symbol"].upper()
-
-            # ✅ Symbol type detect karo
-            is_crypto = symbol_upper in CRYPTO_SYMBOLS
-
-            # ✅ Delta-compatible symbol format
-            delta_symbol = None
-            if is_crypto:
-                delta_symbol = symbol_upper.replace(
-                    "USDT", "-USDT"
-                )  # BTCUSDT → BTC-USDT
-
-            async_to_sync(layer.group_send)(
-                group_name,
-                {
-                    "type": "new_signal",
-                    "direction": sig["direction"],
-                    "symbol": sig["symbol"],
-                    "delta_symbol": delta_symbol,  # ✅ NEW
-                    "market_type": "crypto" if is_crypto else "indian",  # ✅ NEW
-                    "entry": sig["entry_price"],
-                    "sl": sig["stop_loss"],
-                    "target1": sig["take_profit_1"],
-                    "tp": sig["take_profit_1"],  # adapter ke liye
-                    "confidence": sig["confluence"],
-                    "reason": sig["notes"],
-                    "grade": sig["grade"],
-                    "setup": sig["setup_type"],
-                    "rr": sig["risk_reward"],
-                    "position": sig["position_size"],
-                    "risk_inr": sig["risk_amount"],
-                    "tags": sig["tags"],
-                    "breakdown": sig["breakdown"],
-                    "grade_emoji": sig["grade_emoji"],
-                    "strategy": "ICT",
-                    "qty": sig.get("position_size", 0.01),
-                    "leverage": 10,
-                },
-            )
+        from apps.live_trading.screener_pipeline import ScreenerSignalPipeline
+        result = ScreenerSignalPipeline().process(user, signals)
+        logger.info("ScreenerPipeline: %s", result)
     except Exception as e:
-        logger.error("push_screener_signals error: %s", e)
+        logger.error("ScreenerPipeline failed: %s", e, exc_info=True)
