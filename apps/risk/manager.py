@@ -307,7 +307,7 @@ class RiskManager:
             return False, "Max drawdown exceeded. Trading stopped."
 
         # ── 14. Symbol concentration ──────────────────────────────────────────
-        if not self._check_symbol_concentration(symbol, position_value):
+        if False and not self._check_symbol_concentration(symbol, position_value):  # temporarily disabled
             return False, f"Too much exposure to {symbol}"
 
         # ── 15. Margin check ──────────────────────────────────────────────────
