@@ -241,13 +241,20 @@ def _route_global_strategy(strategy, signal):
     from apps.strategies.models import UserStrategyPreference
 
     instrument_type = strategy.instrument_type
-    creator_id = strategy.user.pk if strategy.user else None
+    # FIX: subscriber_strategy.user=Chanchal hota hai, real creator DB se lo
+    real_strategy = getattr(strategy, '_real', strategy)
+    from apps.strategies.models import Strategy as _Strategy
+    try:
+        _db_strat = _Strategy.objects.select_related('user').get(pk=real_strategy.id)
+        creator_id = _db_strat.user.pk if _db_strat.user else None
+    except Exception:
+        creator_id = strategy.user.pk if strategy.user else None
     placed_orders = []
 
     # ── Step 1: Is strategy ko kaun chala raha hai ────────────────
     running_user_ids = list(
         UserStrategyPreference.objects.filter(
-            strategy=strategy,
+            strategy=real_strategy,
             is_running=True,
         )
         .exclude(user_id=creator_id)          # creator ko exclude karo
@@ -369,6 +376,25 @@ def _place_order_for_subscriber(
         account = preloaded_account
     else:
         account = _pick_best_account_for_user(user, instrument_type)
+
+    # preferred_mode check (UserStrategyPreference)
+    from apps.strategies.models import UserStrategyPreference
+    try:
+        real_strategy_id = getattr(strategy, '_real', strategy).id
+        pref = UserStrategyPreference.objects.get(user=user, strategy_id=real_strategy_id)
+        preferred_mode = pref.preferred_mode
+    except UserStrategyPreference.DoesNotExist:
+        preferred_mode = 'paper'
+
+    logger.info("DEBUG preferred_mode | user=%s | strategy=%s | mode=%s", user.pk, real_strategy_id, preferred_mode)
+
+    if preferred_mode == 'paper':
+        logger.info('Global strategy | user=%s | preferred_mode=paper -> paper trade', user.pk)
+        paper_order = _place_paper_trade_for_user(strategy, signal, user)
+        if paper_order:
+            placed_orders.append(paper_order)
+        return
+
 
     # ── Live mode: broker account se order ───────────────────────
     if account:
@@ -607,10 +633,18 @@ def _place_fyers_order(strategy, signal, instrument_type: str, user=None, accoun
     try:
         from apps.risk.manager import RiskManager
         rm = RiskManager(effective_user)
+        _meta = getattr(signal, 'metadata', {}) or {}
+        _sl = getattr(signal, 'sl_price', None) or getattr(signal, 'stop_loss', None) or _meta.get('stop_loss') or _meta.get('sl_price')
+        _tp = getattr(signal, 'tp_price', None) or getattr(signal, 'take_profit', None) or _meta.get('take_profit') or _meta.get('take_profit_1')
+        _sig_type = str(getattr(signal, 'signal_type', 'buy')).lower()
+        _side = 'buy' if _sig_type in ('buy', 'long') else 'sell'
         allowed, reason = rm.can_place_order(
             symbol=signal.symbol,
-            qty=1,  # qty abhi malum nahi, basic check ke liye 1 use karo
-            price=float(signal.price),
+            qty=1,
+            price=Decimal(str(signal.price)),
+            stop_loss=Decimal(str(_sl)) if _sl else None,
+            take_profit=Decimal(str(_tp)) if _tp else None,
+            side=_side,
         )
         if not allowed:
             logger.warning(
@@ -747,7 +781,7 @@ def _calculate_options_qty(strategy, signal, fyers, risk: dict) -> int:
     LOT_SIZES_OPTIONS = {
         "NIFTY":      65,
         "BANKNIFTY":  30,
-        "FINNIFTY":   60,
+        "FINNIFTY":   40,
         "MIDCPNIFTY": 120,
         "SENSEX":     10,
     }
@@ -862,17 +896,23 @@ def _fyers_options_order(strategy, signal, fyers, account, qty: int, risk: dict,
         )
         return None
 
-    # ATM option symbol nikalo
-    # buy signal → CALL, sell signal → PUT
-    option_type = "CE" if signal_type == "buy" else "PE"
-    # ✅ FIX: user pass karo — option chain se real Fyers symbol milega
     _order_user = effective_user or strategy.user
-    option_symbol = get_atm_option_symbol(symbol, current_price, option_type, user=_order_user)
+    min_prem = float(strategy.parameters.get('min_premium', 80))
+    max_prem = float(strategy.parameters.get('max_premium', 400))
 
+    # Directional — best premium
+    option_type = "CE" if signal_type in ("buy", "long") else "PE"
+    from .fyers_utils import get_best_premium_option
+    best = get_best_premium_option(symbol, current_price, option_type, user=_order_user,
+                                   min_premium=min_prem, max_premium=max_prem)
+    if best:
+        option_symbol = best['symbol']
+        logger.info("Best premium | %s | strike=%d | ltp=%.1f",
+                    option_symbol, best['strike'], best['ltp'])
+    else:
+        option_symbol = get_atm_option_symbol(symbol, current_price, option_type, user=_order_user)
     if not option_symbol:
-        logger.error(
-            "ATM option symbol nahi mila | symbol=%s | price=%s", symbol, current_price
-        )
+        logger.error("Option symbol nahi mila | symbol=%s | price=%s", symbol, current_price)
         return None
 
     # ── FIX: qty = lots (Flutter se / capital-based), actual_qty = lots × lot_size ──
@@ -1332,7 +1372,7 @@ def _place_dhan_order(strategy, signal, instrument_type: str, user=None, account
         else:
             # Build ATM option symbol (same logic as Fyers)
             from apps.strategies.fyers_utils import get_atm_option_symbol
-            opt_type = "CE" if signal_type == "buy" else "PE"
+            opt_type = "CE" if signal_type in ("buy", "long") else "PE"
             dhan_symbol = get_atm_option_symbol(symbol, current_price, opt_type, user=effective_user)
             if not dhan_symbol:
                 logger.error("Dhan: ATM option symbol nahi mila | symbol=%s", symbol)
@@ -1611,7 +1651,7 @@ def _place_zerodha_order(strategy, signal, instrument_type: str, user=None, acco
     # ── Symbol + qty + exchange ────────────────────────────────────
     if instrument_type == "options":
         from apps.strategies.fyers_utils import get_atm_option_symbol
-        opt_type = "CE" if signal_type == "buy" else "PE"
+        opt_type = "CE" if signal_type in ("buy", "long") else "PE"
 
         if symbol.endswith("CE") or symbol.endswith("PE"):
             zerodha_symbol = symbol  # Already an option symbol
@@ -1790,7 +1830,7 @@ def _paper_option_trade(
     LOT_SIZES = {
         "NIFTY": 65,
         "BANKNIFTY": 30,
-        "FINNIFTY": 60,
+        "FINNIFTY": 40,
         "MIDCPNIFTY": 120,
         "SENSEX": 10,
     }

@@ -72,8 +72,8 @@ def run_all_active_strategies():
     queue="strategies",
     max_retries=3,
     default_retry_delay=30,
-    soft_time_limit=120,
-    time_limit=150,
+    soft_time_limit=300,
+    time_limit=360,
 )
 def run_strategy_cycle(self, strategy_id: str):
     from .models import Strategy, UserStrategyPreference
@@ -330,7 +330,7 @@ def _run_global_strategy_per_subscriber(task_self, strategy_id: str, strategy):
     queue="default",
     bind=True,
     max_retries=1,
-    soft_time_limit=120,
+    soft_time_limit=300,
 )
 def refresh_all_broker_tokens(self):
     refreshed = 0
@@ -504,7 +504,7 @@ def sync_all_open_orders(self):
 @shared_task(
     name="strategies.take_performance_snapshots",
     queue="default",
-    soft_time_limit=120,
+    soft_time_limit=300,
 )
 def take_performance_snapshots():
     import datetime

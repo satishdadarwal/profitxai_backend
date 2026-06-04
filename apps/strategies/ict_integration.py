@@ -104,6 +104,17 @@ class FyersDataProvider(DataProvider):
         )
 
     def _fetch_sync(self, symbol: str, timeframe: str, bars: int) -> pd.DataFrame:
+        # Redis cache — 5 min tak same candles reuse karo (429 fix)
+        try:
+            from django.core.cache import cache
+            import hashlib
+            cache_key = f"fyers_candles_{hashlib.md5(f"{symbol}_{timeframe}_{bars}".encode()).hexdigest()}"
+            cached = cache.get(cache_key)
+            if cached is not None:
+                import pickle
+                return pickle.loads(cached)
+        except Exception:
+            cache_key = None
         try:
             fyers = self._get_fyers_client()
             from apps.brokers.symbol_mapper import normalize_for_fyers
@@ -633,6 +644,20 @@ class DeltaExecutionAdapter(ExecutionAdapter):
 
 
 # ─── 5. execute_cycle_ict ─────────────────────────────────────────────────────
+def _get_dry_run(strategy):
+    """User ke preferred_mode se dry_run decide karo."""
+    try:
+        from apps.strategies.models import UserStrategyPreference
+        subscriber = getattr(strategy, '_subscriber_user', None) or getattr(strategy, 'user', None)
+        if subscriber:
+            real_id = getattr(strategy, '_real', strategy).id
+            pref = UserStrategyPreference.objects.get(user=subscriber, strategy_id=real_id)
+            return pref.preferred_mode != 'live'
+    except Exception:
+        pass
+    return strategy.mode == "paper"
+
+
 def execute_cycle_ict(strategy, symbol: str) -> dict:
     """
     ICT MTF analysis + signal dispatch — ek cycle.
@@ -653,7 +678,7 @@ def execute_cycle_ict(strategy, symbol: str) -> dict:
         execution_tf="15m",
         min_confluence=strategy.parameters.get("min_confluence", 60.0),
         min_rr=strategy.parameters.get("min_rr", 2.0),
-        dry_run=(strategy.mode == "paper"),
+        dry_run=_get_dry_run(strategy),
         bars_per_tf=strategy.parameters.get("bars_per_tf", 300),
     )
 

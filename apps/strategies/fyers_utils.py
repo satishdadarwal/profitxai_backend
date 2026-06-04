@@ -307,3 +307,72 @@ def _get_current_futures_expiry() -> str:
     yy  = str(expiry.year)[2:]
     mon = _MONTHS[expiry.month]
     return f"{yy}{mon}"
+
+def get_best_premium_option(symbol: str, current_price: float, option_type: str, user=None,
+                             min_premium: float = 80.0, max_premium: float = 400.0) -> dict | None:
+    """
+    Best premium option select karo — ATM ke aaspaas, premium range mein,
+    highest OI + volume wala strike prefer karo.
+    Returns: {'symbol': ..., 'strike': ..., 'ltp': ..., 'oi': ..., 'option_type': ...}
+    """
+    try:
+        from apps.options.nse_fetcher import fetch_nse_option_chain
+        chain_data = fetch_nse_option_chain(symbol=symbol, expiry_ts="", user=user)
+        chain = chain_data.get('chain', [])
+        step = STRIKE_STEPS.get(_clean_symbol(symbol), 50)
+        atm_strike = int(round(current_price / step) * step)
+
+        candidates = []
+        for row in chain:
+            opt = row.get(option_type, {})
+            ltp = float(opt.get('ltp', 0))
+            oi  = float(opt.get('oi', 0))
+            vol = float(opt.get('volume', 0))
+            sym = opt.get('symbol', '')
+            strike = row['strike']
+            if not sym or ltp < min_premium or ltp > max_premium:
+                continue
+            # ATM se kitna door hai (prefer closer)
+            distance = abs(strike - atm_strike)
+            candidates.append({
+                'symbol': sym,
+                'strike': strike,
+                'ltp': ltp,
+                'oi': oi,
+                'volume': vol,
+                'distance': distance,
+                'option_type': option_type,
+            })
+
+        if not candidates:
+            logger.warning("No candidate found in premium range ₹%.0f-₹%.0f | %s %s",
+                           min_premium, max_premium, symbol, option_type)
+            return None
+
+        # Score: OI + volume high, distance ATM se kam
+        def score(c):
+            return (c['oi'] + c['volume']) / (c['distance'] + 1)
+
+        best = max(candidates, key=score)
+        logger.info("Best premium option | %s | strike=%d | ltp=₹%.1f | oi=%d | vol=%d",
+                    best['symbol'], best['strike'], best['ltp'], best['oi'], best['volume'])
+        return best
+    except Exception as e:
+        logger.exception("get_best_premium_option error: %s", e)
+        return None
+
+
+def get_straddle_options(symbol: str, current_price: float, user=None,
+                          min_premium: float = 80.0, max_premium: float = 400.0) -> dict | None:
+    """
+    Market neutral straddle — ATM CE + ATM PE dono.
+    Returns: {'CE': {...}, 'PE': {...}}
+    """
+    ce = get_best_premium_option(symbol, current_price, 'CE', user, min_premium, max_premium)
+    pe = get_best_premium_option(symbol, current_price, 'PE', user, min_premium, max_premium)
+    if not ce or not pe:
+        logger.warning("Straddle nahi ban saka | %s | CE=%s | PE=%s", symbol, ce, pe)
+        return None
+    logger.info("Straddle ready | %s | CE=%s ₹%.1f | PE=%s ₹%.1f",
+                symbol, ce['symbol'], ce['ltp'], pe['symbol'], pe['ltp'])
+    return {'CE': ce, 'PE': pe}

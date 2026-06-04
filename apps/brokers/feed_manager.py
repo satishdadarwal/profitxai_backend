@@ -64,7 +64,18 @@ def on_price_tick(symbol: str, ltp: float, extra_data: dict = None):
         try:
             from decimal import Decimal as _D
             from apps.paper_trading.models import PaperTrade, normalize_symbol
-            PaperTrade.objects.filter(symbol=normalize_symbol(symbol), status="open").update(current_price=_D(str(ltp)))
+            _sym = normalize_symbol(symbol)
+            _ltp = _D(str(ltp))
+            _open_trades = PaperTrade.objects.filter(symbol=_sym, status='open')
+            for _pt in _open_trades:
+                if _pt.entry_price and _pt.quantity:
+                    if _pt.side == 'buy':
+                        _upnl = (_ltp - _pt.entry_price) * _pt.quantity
+                    else:
+                        _upnl = (_pt.entry_price - _ltp) * _pt.quantity
+                    _pt.current_price = _ltp
+                    _pt.unrealized_pnl = _upnl
+                    _pt.save(update_fields=['current_price', 'unrealized_pnl', 'updated_at'])
         except Exception as _pe:
             logger.error("PaperTrade tick | %s | %s", symbol, _pe)
 

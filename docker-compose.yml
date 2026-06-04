@@ -57,6 +57,8 @@ services:
     build: .
     restart: always
     command: celery -A config worker -Q orders,celery -c 4 -l info -E -n orders@%h
+    environment:
+      CELERY_WORKER_RUNNING: "1"
     volumes:
       - .:/app
     env_file: .env
@@ -71,6 +73,8 @@ services:
     build: .
     restart: always
     command: celery -A config worker -Q strategies,default -c 4 -l info -E -n strategies@%h
+    environment:
+      CELERY_WORKER_RUNNING: "1"
     volumes:
       - .:/app
     env_file: .env
@@ -85,6 +89,8 @@ services:
     build: .
     restart: always
     command: celery -A config beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler
+    environment:
+      CELERY_WORKER_RUNNING: "1"
     volumes:
       - .:/app
     env_file: .env
