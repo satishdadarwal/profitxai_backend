@@ -433,7 +433,16 @@ def _get_active_asset(symbol: str) -> Asset:
     try:
         asset = Asset.objects.get(symbol__iexact=symbol)
     except Asset.DoesNotExist:
-        raise InvalidOrderError(f"Asset '{symbol}' not found.")
+        # Options/futures symbol auto-create karo
+        from apps.market.models import Asset as MarketAsset
+        asset, _ = MarketAsset.objects.get_or_create(
+            symbol=symbol.upper(),
+            defaults={
+                "name": symbol.upper(),
+                "asset_type": "option" if any(x in symbol.upper() for x in ["CE","PE"]) else "equity",
+                "is_active": True,
+            }
+        )
     if not asset.is_active:
         raise AssetDisabledError(f"Trading for {symbol} is currently disabled.")
     return asset
@@ -442,18 +451,23 @@ def _get_active_asset(symbol: str) -> Asset:
 def _check_and_lock_funds(
     *, user, asset: Asset, side: str, quantity: Decimal, price: Decimal
 ):
-    """BUY: USDT lock; SELL: asset lock."""
+    """BUY: INR lock; SELL: asset lock."""
     wallet = Wallet.objects.select_for_update().get(user=user)
 
     if side == Order.Side.BUY:
         required = (quantity * price * (1 + FEE_RATE)).quantize(Decimal("0.01"))
         if wallet.available_balance < required:
             raise InsufficientFundsError(
-                f"Need {required} USDT, available {wallet.available_balance}."
+                f"Need {required} INR, available {wallet.available_balance}."
             )
         wallet.available_balance -= required
         wallet.locked_balance += required
     else:  # SELL
+        sym_upper = asset.symbol.upper()
+        is_derivative = any(x in sym_upper for x in ['CE', 'PE', 'FUT'])
+        if is_derivative:
+            wallet.save(update_fields=['available_balance', 'locked_balance', 'updated_at'])
+            return
         asset_wallet = Wallet.objects.select_for_update().get(
             user=user, currency=asset.symbol
         )

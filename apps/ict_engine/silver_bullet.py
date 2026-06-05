@@ -146,7 +146,7 @@ class SilverBullet2MStrategy:
 
     # --- Daily bias from 1H BOS ----------------------------------------------
     def _compute_bias(self, df_1h: pd.DataFrame) -> str:
-        """1H last BOS direction = daily bias."""
+        """1H last BOS + EMA20 confirmation = daily bias."""
         if df_1h.empty or len(df_1h) < 50:
             return "neutral"
 
@@ -168,10 +168,23 @@ class SilverBullet2MStrategy:
             last_bos = breaks[-1]
 
         if last_bos.direction == BreakDirection.BULLISH:
-            return "bullish"
+            bos_bias = "bullish"
         elif last_bos.direction == BreakDirection.BEARISH:
+            bos_bias = "bearish"
+        else:
+            return "neutral"
+
+        # EMA20 confirmation — current price vs 1H EMA20
+        ema20 = df_1h["close"].ewm(span=20, adjust=False).mean()
+        current_price = float(df_1h["close"].iloc[-1])
+        ema20_val = float(ema20.iloc[-1])
+        if bos_bias == "bullish" and current_price < ema20_val * 0.998:
+            logger.info("Bias override bullish->bearish | price=%.2f EMA20=%.2f", current_price, ema20_val)
             return "bearish"
-        return "neutral"
+        if bos_bias == "bearish" and current_price > ema20_val * 1.002:
+            logger.info("Bias override bearish->bullish | price=%.2f EMA20=%.2f", current_price, ema20_val)
+            return "bullish"
+        return bos_bias
 
     # --- Liquidity raid detection ---------------------------------------------
     def _detect_sweep(self, df_2m: pd.DataFrame, bias: str) -> Optional[dict]:
