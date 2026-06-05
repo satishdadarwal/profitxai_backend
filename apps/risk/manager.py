@@ -312,7 +312,7 @@ class RiskManager:
         # ── 12. Risk-reward check ─────────────────────────────────────────────
         if stop_loss and take_profit:
             rr = self._calculate_rr_ratio(price, stop_loss, take_profit, side)
-            if False and rr < self.limits.min_risk_reward:  # temporarily disabled
+            if rr < self.limits.min_risk_reward:
                 return False, f"RR too low ({rr:.2f} < {self.limits.min_risk_reward} min)"
 
         # ── 13. Drawdown limit ────────────────────────────────────────────────
