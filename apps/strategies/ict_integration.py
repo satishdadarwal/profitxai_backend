@@ -537,6 +537,8 @@ class FyersExecutionAdapter(ExecutionAdapter):
                         })
                         logger.info("OCO GTT placed | sl=%.2f | tp=%.2f | result=%s", sl_price, tp_price, gtt_result)
 
+                except Exception as gtt_err:
+                    logger.warning("GTT failed: %s", gtt_err)
             return str(broker_id)
         except Exception as e:
             logger.error("FyersExecutionAdapter.place_order error: %s", e)
