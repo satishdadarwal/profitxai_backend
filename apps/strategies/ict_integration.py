@@ -516,39 +516,25 @@ class FyersExecutionAdapter(ExecutionAdapter):
                         sl_price = round(entry_price * (1 - sl_pct), 2)
                         tp_price = round(entry_price * (1 + tp_pct), 2)
 
-                        # SL GTT
-                        gtt_sl = fyers.place_order(data={
+                        # OCO GTT — leg1=Target (above LTP), leg2=SL (below LTP)
+                        gtt_result = fyers.fyers.place_gtt_order(data={
+                            "side": -1,
                             "symbol": fyers_sym,
-                            "qty": qty,
-                            "type": 3,      # SL order
-                            "side": -1,     # Sell
                             "productType": "INTRADAY",
-                            "validity": "DAY",
-                            "stopPrice": sl_price,
-                            "limitPrice": round(sl_price * 0.98, 2),
-                            "offlineOrder": False,
-                            "stopLoss": 0,
-                            "takeProfit": 0,
+                            "orderInfo": {
+                                "leg1": {
+                                    "price": tp_price,
+                                    "triggerPrice": tp_price,
+                                    "qty": qty,
+                                },
+                                "leg2": {
+                                    "price": round(sl_price * 0.98, 2),
+                                    "triggerPrice": sl_price,
+                                    "qty": qty,
+                                },
+                            },
                         })
-                        logger.info("SL order placed | price=%.2f | result=%s", sl_price, gtt_sl)
-
-                        # Target GTT
-                        gtt_tp = fyers.place_order(data={
-                            "symbol": fyers_sym,
-                            "qty": qty,
-                            "type": 1,      # Limit order
-                            "side": -1,     # Sell
-                            "productType": "INTRADAY",
-                            "validity": "DAY",
-                            "stopPrice": 0,
-                            "limitPrice": tp_price,
-                            "offlineOrder": False,
-                            "stopLoss": 0,
-                            "takeProfit": 0,
-                        })
-                        logger.info("Target order placed | price=%.2f | result=%s", tp_price, gtt_tp)
-                except Exception as gtt_err:
-                    logger.error("GTT order error: %s", gtt_err)
+                        logger.info("OCO GTT placed | sl=%.2f | tp=%.2f | result=%s", sl_price, tp_price, gtt_result)
 
             return str(broker_id)
         except Exception as e:
