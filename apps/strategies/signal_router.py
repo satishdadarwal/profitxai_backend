@@ -980,6 +980,19 @@ def _fyers_options_order(strategy, signal, fyers, account, qty: int, risk: dict,
             "Fyers options order placed | lots=%d | qty=%d | order_id=%s | exchange_id=%s",
             qty, actual_qty, order.id if order else None, exchange_order_id,
         )
+        # ── GTT SL/Target order place karo ──────────────────────
+        if order and exchange_order_id:
+            try:
+                _place_fyers_gtt(
+                    fyers=fyers,
+                    option_symbol=option_symbol,
+                    actual_qty=actual_qty,
+                    sl_price=sl_price,
+                    tgt_price=tgt_price,
+                    option_type=option_type,
+                )
+            except Exception as gtt_err:
+                logger.warning("GTT set failed (entry OK) | err=%s", gtt_err)
         return order
     else:
         reject_reason = resp.get("message", "Unknown error")
@@ -996,6 +1009,31 @@ def _fyers_options_order(strategy, signal, fyers, account, qty: int, risk: dict,
         )
         return None
 
+
+
+def _place_fyers_gtt(fyers, option_symbol: str, actual_qty: int, sl_price: float, tgt_price: float, option_type: str):
+    """Entry ke baad Fyers GTT OCO order place karo — SL + Target dono."""
+    # OCO: leg1 = target (above LTP), leg2 = SL (below LTP)
+    gtt_data = {
+        "symbol": option_symbol,
+        "side": -1,  # sell (exit)
+        "productType": "INTRADAY",
+        "orderInfo": {
+            "leg1": {
+                "price": round(tgt_price, 2),
+                "triggerPrice": round(tgt_price, 2),
+                "qty": actual_qty,
+            },
+            "leg2": {
+                "price": round(sl_price, 2),
+                "triggerPrice": round(sl_price, 2),
+                "qty": actual_qty,
+            },
+        },
+    }
+    resp = fyers.place_gtt_order(data=gtt_data)
+    logger.info("GTT OCO placed | symbol=%s | sl=%.2f | tgt=%.2f | resp=%s", option_symbol, sl_price, tgt_price, resp)
+    return resp
 
 def _fyers_futures_order(strategy, signal, fyers, account, qty: int, risk: dict, effective_user=None):
     """Fyers F&O futures order"""
