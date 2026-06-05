@@ -937,6 +937,13 @@ def execute_silver_bullet_cycle(strategy, symbol: str) -> dict:
             symbol__icontains=clean_symbol,
             status="open",
         ).exists()
+        if not already_open:
+            from apps.orders.models import Order as _Order
+            already_open = _Order.objects.filter(
+                strategy_id=strategy.id,
+                symbol__icontains=clean_symbol,
+                status__in=["open", "filled", "partial"],
+            ).exists()
 
         if already_open:
             logger.info(

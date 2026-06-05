@@ -974,7 +974,7 @@ def _fyers_options_order(strategy, signal, fyers, account, qty: int, risk: dict,
             instrument_type="options",
             broker=account,
             exchange_order_id=exchange_order_id,
-            mode=strategy.mode,
+            mode="live",  # FIX: broker fn = always live
         )
         logger.info(
             "Fyers options order placed | lots=%d | qty=%d | order_id=%s | exchange_id=%s",
@@ -1100,7 +1100,7 @@ def _fyers_futures_order(strategy, signal, fyers, account, qty: int, risk: dict,
             instrument_type="futures",
             broker=strategy.broker,
             exchange_order_id=exchange_order_id,
-            mode=strategy.mode,
+            mode="live",  # FIX: broker fn = always live
         )
         logger.info(
             "Fyers futures order placed | lots=%d | qty=%d | order_id=%s",
@@ -1172,7 +1172,7 @@ def _fyers_equity_order(strategy, signal, fyers, account, qty: int, risk: dict, 
             instrument_type="equity",
             broker=strategy.broker,
             exchange_order_id=exchange_order_id,
-            mode=strategy.mode,
+            mode="live",  # FIX: broker fn = always live
         )
         return order
     else:
@@ -1268,7 +1268,7 @@ def _place_delta_order(strategy, signal, instrument_type: str, user=None, accoun
                 instrument_type=instrument_type,
                 broker=strategy.broker,
                 exchange_order_id=exchange_order_id,
-                mode=strategy.mode,
+                mode="live",  # FIX: broker fn = always live
             )
             logger.info(
                 "Delta order placed | symbol=%s | side=%s | qty=%d | price=%s",
@@ -1477,7 +1477,7 @@ def _place_dhan_order(strategy, signal, instrument_type: str, user=None, account
             broker=account,
             exchange_order_id=result.order_id or "",
             broker_response=result.raw,
-            mode=strategy.mode,
+            mode="live",  # FIX: broker fn = always live
         )
         logger.info(
             "✅ Dhan order placed | user=%s | order_id=%s | exchange_id=%s",
@@ -1764,7 +1764,7 @@ def _place_zerodha_order(strategy, signal, instrument_type: str, user=None, acco
             instrument_type=instrument_type,
             broker=account,
             exchange_order_id=result.order_id or "",
-            mode=strategy.mode,
+            mode="live",  # FIX: broker fn = always live
         )
         logger.info(
             "✅ Zerodha order placed | user=%s | order_id=%s | exchange_id=%s",
