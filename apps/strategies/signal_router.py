@@ -638,10 +638,14 @@ def _place_fyers_order(strategy, signal, instrument_type: str, user=None, accoun
         _tp = getattr(signal, 'tp_price', None) or getattr(signal, 'take_profit', None) or _meta.get('take_profit') or _meta.get('take_profit_1')
         _sig_type = str(getattr(signal, 'signal_type', 'buy')).lower()
         _side = 'buy' if _sig_type in ('buy', 'long') else 'sell'
+        # Options mein risk check ke liye premium use karo, spot price nahi
+        _instr = getattr(strategy, 'instrument_type', 'equity')
+        _raw_price = Decimal(str(signal.price))
+        _check_price = round(_raw_price * Decimal("0.03"), 2) if _instr == 'options' else _raw_price
         allowed, reason = rm.can_place_order(
             symbol=signal.symbol,
             qty=1,
-            price=Decimal(str(signal.price)),
+            price=_check_price,
             stop_loss=Decimal(str(_sl)) if _sl else None,
             take_profit=Decimal(str(_tp)) if _tp else None,
             side=_side,
