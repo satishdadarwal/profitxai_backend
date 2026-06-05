@@ -42,6 +42,36 @@ STRIKE_STEPS = {
 # Monthly futures: 3-char (JAN, FEB ... DEC)
 _MONTHS = ["", "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
            "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]
+def calculate_lots(symbol: str, premium: float, capital: float, risk_pct: float = 0.10) -> int:
+    """
+    Universal lot calculator — NIFTY/BANKNIFTY/SENSEX/FINNIFTY sab ke liye.
+    
+    Args:
+        symbol:   Base symbol e.g. 'NIFTY', 'BANKNIFTY', 'SENSEX'
+        premium:  Current option premium (LTP) per share
+        capital:  User wallet balance (INR)
+        risk_pct: Max % of capital to risk per trade (default 10%)
+    
+    Returns:
+        lots (int) — minimum 1
+    
+    Logic:
+        risk_amount = capital * risk_pct
+        lot_size    = LOT_SIZES[symbol]
+        cost_per_lot = premium * lot_size
+        lots = max(1, floor(risk_amount / cost_per_lot))
+    """
+    import math
+    base = _clean_symbol(symbol)
+    lot_size = LOT_SIZES.get(base, 1)
+    if premium <= 0 or lot_size <= 0:
+        return 1
+    risk_amount = capital * risk_pct
+    cost_per_lot = premium * lot_size
+    lots = max(1, math.floor(risk_amount / cost_per_lot))
+    return lots
+
+
 
 # ✅ FIX: Fyers weekly option format uses single-char month code
 # Jan=1 ... Sep=9, Oct=O, Nov=N, Dec=D

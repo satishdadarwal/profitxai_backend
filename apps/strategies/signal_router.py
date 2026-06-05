@@ -856,22 +856,50 @@ def _calculate_options_qty(strategy, signal, fyers, risk: dict) -> int:
         # Estimate: ATM option ~ 0.4-0.5% of underlying (rough)
         # Real scenario mein Fyers quote API se milega
         underlying_price = float(signal.price)
-        estimated_premium = round(underlying_price * 0.004, 2)  # ~0.4%
-        estimated_premium = max(estimated_premium, 10.0)  # minimum 10 rs
+        signal_type = getattr(signal, "signal_type", "buy")
+        option_type = "CE" if signal_type in ("buy", "long") else "PE"
 
-        # ── 5. Qty calculate karo ────────────────────────────────
-        cost_per_lot = estimated_premium * lot_size
-        if cost_per_lot <= 0:
-            return 1
+        # ── Actual premium — NSE option chain se ─────────────────
+        option_premium = 0.0
+        try:
+            from .fyers_utils import get_best_premium_option
+            best = get_best_premium_option(
+                symbol=base,
+                current_price=underlying_price,
+                option_type=option_type,
+                user=strategy.user,
+            )
+            if best:
+                option_premium = float(best.get("ltp", 0) or best.get("premium", 0))
+                logger.info("NSE premium | %s %s | premium=%.1f", base, option_type, option_premium)
+        except Exception as e:
+            logger.warning("NSE premium fetch failed | %s", e)
 
-        lots = int(trade_capital / cost_per_lot)
-        lots = max(1, min(lots, max_lots))  # 1 se max_lots ke beech
+        if option_premium <= 0:
+            option_premium = max(round(underlying_price * 0.004, 2), 10.0)
+            logger.info("Premium fallback | premium~%.1f", option_premium)
 
-        logger.info(
-            "Options qty calc | capital=₹%.0f | premium~₹%.1f | lot_size=%d | "
-            "cost_per_lot=₹%.0f | lots=%d",
-            trade_capital, estimated_premium, lot_size, cost_per_lot, lots,
-        )
+        # ── calculate_lots() — wallet + TradingProfile based ─────
+        try:
+            from .fyers_utils import calculate_lots
+            from apps.wallet.models import Wallet
+            _w = Wallet.objects.get(user=strategy.user, currency="INR")
+            _capital = float(_w.available_balance + _w.locked_balance)
+            try:
+                _tp = strategy.user.trading_profile
+                _risk_pct = float(_tp.risk_per_trade_pct) if _tp.risk_per_trade_pct else 0.10
+            except Exception:
+                _risk_pct = 0.10
+            lots = calculate_lots(base, option_premium, _capital, _risk_pct)
+            lots = min(lots, max_lots)
+            logger.info(
+                "Options qty | wallet=%.0f | risk_pct=%.0f%% | premium=%.1f | lot_size=%d | lots=%d",
+                _capital, _risk_pct*100, option_premium, lot_size, lots,
+            )
+        except Exception as e:
+            logger.warning("calculate_lots fallback | %s", e)
+            cost_per_lot = option_premium * lot_size
+            lots = max(1, min(int(trade_capital / cost_per_lot) if cost_per_lot > 0 else 1, max_lots))
         return lots
 
     except Exception as e:

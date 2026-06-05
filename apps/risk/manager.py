@@ -870,14 +870,38 @@ class RiskManager:
         try:
             profile = self.user.trading_profile
             capital = self._get_total_capital_safe()
+
+            # ── % based limits — auto-scale with capital ──────────
+            # Agar profile mein pct set hai toh capital se calculate karo
+            # Warna hardcoded value use karo (backward compat)
+            if profile.max_daily_loss_pct:
+                max_loss_per_day = capital * profile.max_daily_loss_pct
+            else:
+                max_loss_per_day = profile.max_daily_loss or Decimal("10000")
+
+            if profile.risk_per_trade_pct:
+                max_loss_per_trade = capital * profile.risk_per_trade_pct
+            else:
+                max_loss_per_trade = profile.max_loss_per_trade or Decimal("2000")
+
+            if profile.max_position_pct:
+                max_position_size = capital * profile.max_position_pct
+            else:
+                max_position_size = profile.max_position_size or Decimal("100000")
+
+            logger.info(
+                "RiskLimits loaded | user=%s | capital=%.0f | max_loss_trade=%.0f | max_daily=%.0f | max_pos=%.0f",
+                self.user.id, capital, max_loss_per_trade, max_loss_per_day, max_position_size,
+            )
+
             return RiskLimits(
-                max_loss_per_day      = profile.max_daily_loss or Decimal("10000"),
+                max_loss_per_day      = max_loss_per_day,
                 max_profit_lock       = profile.profit_lock_amount or Decimal("5000"),
                 max_trades_per_day    = profile.max_daily_trades or 50,
-                max_position_size     = profile.max_position_size or Decimal("100000"),
+                max_position_size     = max_position_size,
                 max_positions         = profile.max_positions or 10,
                 max_drawdown          = profile.max_drawdown or Decimal("0.20"),
-                max_loss_per_trade    = profile.max_loss_per_trade or Decimal("2000"),
+                max_loss_per_trade    = max_loss_per_trade,
                 min_risk_reward       = profile.min_rr_ratio or Decimal("1.5"),
                 stop_loss_required    = profile.require_stop_loss,
                 capital_risk_pct      = self._get_capital_risk_pct(capital),

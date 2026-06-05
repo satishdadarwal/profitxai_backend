@@ -906,9 +906,32 @@ def execute_silver_bullet_cycle(strategy, symbol: str) -> dict:
     if df_1h.empty or df_2m.empty:
         return _null_sb_signal(symbol)
 
+    # ── User ka actual capital aur risk % fetch karo ─────────────
+    try:
+        from apps.wallet.models import Wallet
+        from decimal import Decimal
+        _wallet = Wallet.objects.get(user=strategy.user, currency="INR")
+        _capital = float(_wallet.available_balance + _wallet.locked_balance)
+    except Exception:
+        _capital = float(strategy.parameters.get("capital", 100_000))
+
+    try:
+        _tp = strategy.user.trading_profile
+        if _tp.risk_per_trade_pct:
+            _risk_pct = float(_tp.risk_per_trade_pct) * 100  # 0.10 → 10.0
+        else:
+            _risk_pct = float(strategy.parameters.get("risk_pct", 1.0))
+    except Exception:
+        _risk_pct = float(strategy.parameters.get("risk_pct", 1.0))
+
+    logger.info(
+        "SB init | user=%s | capital=%.0f | risk_pct=%.1f%%",
+        strategy.user.id, _capital, _risk_pct,
+    )
+
     sb = SilverBullet2MStrategy(
-        account_balance=float(strategy.parameters.get("capital", 100_000)),
-        risk_per_trade_pct=float(strategy.parameters.get("risk_pct", 1.0)),
+        account_balance=_capital,
+        risk_per_trade_pct=_risk_pct,
         min_rr=float(strategy.parameters.get("min_rr", 3.0)),
         sl_buffer_points=float(strategy.parameters.get("sl_buffer", 5.0)),
     )

@@ -23,6 +23,21 @@ class TradingProfile(models.Model):
     max_loss_per_trade = models.DecimalField(max_digits=14, decimal_places=2, default=2000)
     min_rr_ratio = models.DecimalField(max_digits=5, decimal_places=2, default=1.5)
     
+    # ── % Based Risk Config (auto-scales with capital) ──────────
+    # Agar None hai toh hardcoded max_* values use honge (backward compat)
+    risk_per_trade_pct = models.DecimalField(
+        max_digits=5, decimal_places=4, null=True, blank=True,
+        help_text="Per trade max loss % of capital. e.g. 0.02 = 2%"
+    )
+    max_daily_loss_pct = models.DecimalField(
+        max_digits=5, decimal_places=4, null=True, blank=True,
+        help_text="Max daily loss % of capital. e.g. 0.05 = 5%"
+    )
+    max_position_pct = models.DecimalField(
+        max_digits=5, decimal_places=4, null=True, blank=True,
+        help_text="Max position size % of capital. e.g. 0.10 = 10%"
+    )
+
     # Preferences
     require_stop_loss = models.BooleanField(default=True)
     
