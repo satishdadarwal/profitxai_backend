@@ -501,10 +501,17 @@ class FyersExecutionAdapter(ExecutionAdapter):
             # ── GTT SL/Target order lagao ────────────────────────────────
             if broker_id and broker_id != "unknown" and instr_type == "options":
                 try:
-                    entry_price = float(order.price) if order.price else 0
-                    sl_pct = float(getattr(self, '_sl_pct', 20)) / 100
-                    tp_pct = float(getattr(self, '_tp_pct', 40)) / 100
-
+                    # Market order mein price=0 hota hai, LTP se lo
+                    entry_price = float(order.price) if (order.price and float(order.price) > 0) else 0
+                    if entry_price == 0:
+                        try:
+                            ltp_data = fyers.fyers.quotes(data={"symbols": fyers_sym})
+                            entry_price = float(ltp_data["d"][0]["v"]["lp"])
+                            logger.info("Entry price from LTP: %.2f", entry_price)
+                        except Exception as ltp_err:
+                            logger.warning("LTP fetch failed: %s", ltp_err)
+                    sl_pct = float(getattr(self, "_sl_pct", 20)) / 100
+                    tp_pct = float(getattr(self, "_tp_pct", 40)) / 100
                     if entry_price > 0:
                         sl_price = round(entry_price * (1 - sl_pct), 2)
                         tp_price = round(entry_price * (1 + tp_pct), 2)
