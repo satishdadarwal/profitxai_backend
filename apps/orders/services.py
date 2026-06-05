@@ -92,13 +92,16 @@ def place_order(
 
     with db_transaction.atomic():
         if mode == Order.Mode.LIVE:
-            _check_and_lock_funds(
-                user=user,
-                asset=asset,
-                side=side,
-                quantity=quantity,
-                price=limit_price or asset.last_price,
-            )
+            sym_upper = asset_symbol.upper()
+            is_derivative = any(x in sym_upper for x in ['CE', 'PE', 'FUT', 'INDEX'])
+            if not is_derivative:
+                _check_and_lock_funds(
+                    user=user,
+                    asset=asset,
+                    side=side,
+                    quantity=quantity,
+                    price=limit_price or asset.last_price,
+                )
 
         order = Order.objects.create(
             user=user,
