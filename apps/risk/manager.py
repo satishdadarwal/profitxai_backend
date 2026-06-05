@@ -507,7 +507,7 @@ class RiskManager:
             from apps.orders.models import Order
 
             open_orders = Order.objects.filter(
-                user=self.user, status="filled"
+                user=self.user, status="open"
             ).values_list("asset__symbol", "side")
 
             open_symbols = {sym.upper(): od_side for sym, od_side in open_orders if sym}
