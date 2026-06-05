@@ -55,9 +55,14 @@ def on_price_tick(symbol: str, ltp: float, extra_data: dict = None):
             "volume":    payload.get("volume", 0),
         })
 
-        async_to_sync(channel_layer.group_send)(
-            "market", {"type": "market_update", "data": payload}
-        )
+        try:
+            async_to_sync(channel_layer.group_send)(
+                "market", {"type": "market_update", "data": payload}
+            )
+        except RuntimeError as _e:
+            if 'interpreter shutdown' in str(_e) or 'cannot schedule' in str(_e):
+                return
+            raise
 
         _update_ltp_cache(symbol, ltp)
         _update_position_pnl(symbol, ltp)
