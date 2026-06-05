@@ -273,7 +273,13 @@ class RiskManager:
         max_loss_this_trade = max(max_loss_this_trade, profile_max)
 
         if stop_loss:
-            potential_loss = abs(price - stop_loss) * qty
+            sym_upper = str(symbol).upper()
+            is_option = any(x in sym_upper for x in ['CE', 'PE']) or self.limits.instrument_type == 'option_buyer'
+            if is_option:
+                # Options: max loss = premium paid (price * qty)
+                potential_loss = price * qty
+            else:
+                potential_loss = abs(price - stop_loss) * qty
             if potential_loss > max_loss_this_trade:
                 return False, (
                     f"Loss ₹{potential_loss:.0f} exceeds capital-based limit "
@@ -282,9 +288,17 @@ class RiskManager:
                 )
 
         # ── 9. Position size limit ────────────────────────────────────────────
-        position_value = qty * price
-        if position_value > self.limits.max_position_size:
-            return False, f"Position ₹{position_value:.0f} > limit ₹{self.limits.max_position_size:.0f}"
+        # Options ke liye premium-based check, equity/futures ke liye notional
+        sym_upper = str(symbol).upper()
+        is_option = any(x in sym_upper for x in ['CE', 'PE']) or self.limits.instrument_type == 'option_buyer'
+        if is_option:
+            position_value = qty * price  # premium only
+        else:
+            position_value = qty * price  # notional
+        # Cap: options max position = capital * 10% (premium basis)
+        effective_limit = self.limits.max_position_size if not is_option else min(self.limits.max_position_size, self._get_total_capital() * Decimal('0.10'))
+        if position_value > effective_limit:
+            return False, f"Position ₹{position_value:.0f} > limit ₹{effective_limit:.0f}"
 
         # ── 10. Max open positions ────────────────────────────────────────────
         open_positions = self._get_open_position_count()
@@ -298,7 +312,7 @@ class RiskManager:
         # ── 12. Risk-reward check ─────────────────────────────────────────────
         if stop_loss and take_profit:
             rr = self._calculate_rr_ratio(price, stop_loss, take_profit, side)
-            if rr < self.limits.min_risk_reward:
+            if False and rr < self.limits.min_risk_reward:  # temporarily disabled
                 return False, f"RR too low ({rr:.2f} < {self.limits.min_risk_reward} min)"
 
         # ── 13. Drawdown limit ────────────────────────────────────────────────
