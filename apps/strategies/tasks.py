@@ -22,6 +22,15 @@ logger = logging.getLogger(__name__)
 def run_all_active_strategies():
     from apps.strategies.models import Strategy
 
+    import datetime, pytz
+    ist = pytz.timezone('Asia/Kolkata')
+    now_ist = datetime.datetime.now(ist).time()
+    in_market_hours = datetime.time(9, 15) <= now_ist <= datetime.time(15, 35)
+    if in_market_hours:
+        for s in Strategy.objects.filter(is_active=True, state=Strategy.State.IDLE):
+            logger.warning('Auto-recovering idle strategy | id=%s | name=%s', s.id, s.name)
+            s.state = Strategy.State.RUNNING
+            s.save(update_fields=['state', 'updated_at'])
     active_strategies = Strategy.objects.filter(
         state=Strategy.State.RUNNING
     ).values_list('id', flat=True)
