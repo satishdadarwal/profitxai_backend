@@ -133,7 +133,7 @@ class SilverBullet2MStrategy:
         account_balance: float = 100_000,
         risk_per_trade_pct: float = 1.0,
         min_rr: float = 3.0,
-        sweep_lookback_bars: int = 30,
+        sweep_lookback_bars: int = 100,
         mss_lookback_bars: int = 20,
         sl_buffer_points: float = 5.0,
     ):

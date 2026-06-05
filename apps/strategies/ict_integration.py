@@ -108,7 +108,7 @@ class FyersDataProvider(DataProvider):
         try:
             from django.core.cache import cache
             import hashlib
-            cache_key = f"fyers_candles_{hashlib.md5(f"{symbol}_{timeframe}_{bars}".encode()).hexdigest()}"
+            cache_key = f"fyers_candles_{hashlib.md5((symbol + "_" + timeframe + "_" + str(bars)).encode()).hexdigest()}"
             cached = cache.get(cache_key)
             if cached is not None:
                 import pickle
