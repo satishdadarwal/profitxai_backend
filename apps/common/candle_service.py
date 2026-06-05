@@ -505,6 +505,16 @@ def fetch_candles_for_strategy(
     bars: int = 200,
 ) -> List[CandleBar]:
     import time as _time
+    import hashlib, pickle
+    try:
+        from django.core.cache import cache as _djcache
+        _ck = f'candles_{hashlib.md5((symbol+timeframe+str(bars)).encode()).hexdigest()}'
+        _hit = _djcache.get(_ck)
+        if _hit is not None:
+            return pickle.loads(_hit)
+    except Exception:
+        _djcache = None
+        _ck = None
 
     now_ts = int(_time.time())
 
@@ -567,4 +577,10 @@ def fetch_candles_for_strategy(
     if candles and len(candles) > bars:
         candles = candles[-bars:]
 
+    try:
+        if _djcache and _ck and candles:
+            import pickle
+            _djcache.set(_ck, pickle.dumps(candles), timeout=300)
+    except Exception:
+        pass
     return candles
