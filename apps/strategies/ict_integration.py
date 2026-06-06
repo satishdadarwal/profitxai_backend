@@ -593,6 +593,32 @@ class DeltaExecutionAdapter(ExecutionAdapter):
                     f"Fix: Admin panel mein is user ke liye Delta broker account add karo."
                 )
 
+            # DUPLICATE GUARD: already open position hai iss symbol+user+mode pe?
+            from apps.orders.models import Position
+            from django.apps import apps
+            Asset = [m for m in apps.get_models() if m.__name__ == 'Asset'][0]
+            _side = "buy" if order.direction.value in ("long", "buy") else "sell"
+            _mode = getattr(order, '_mode', 'live')
+            try:
+                _asset = Asset.objects.filter(symbol=order.symbol).first()
+                if _asset:
+                    _existing = Position.objects.filter(
+                        user=self.user,
+                        asset=_asset,
+                        mode=_mode,
+                        status='open',
+                        side=_side,
+                    ).first()
+                    if _existing:
+                        logger.warning(
+                            "DUPLICATE BLOCKED | Delta | symbol=%s | mode=%s | "
+                            "existing_position=%s opened_at=%s",
+                            order.symbol, _mode, _existing.id, _existing.opened_at,
+                        )
+                        return "duplicate_skipped"
+            except Exception as _de:
+                logger.warning("Duplicate check failed (non-fatal): %s", _de)
+
             # Direction: long → buy, short → sell
             side = "buy" if order.direction.value in ("long", "buy") else "sell"
 

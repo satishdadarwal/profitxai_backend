@@ -36,10 +36,25 @@ def create_position_on_order_fill(sender, instance, created, **kwargs):
         logger.debug(f"Skipping position creation for SELL order {instance.id}")
         return
     
-    # Check if position already exists
+    # Check if position already exists for THIS order
     existing_position = Position.objects.filter(opening_order=instance).first()
     if existing_position:
         logger.info(f"Position {existing_position.id} already exists for order {instance.id}")
+        return
+
+    # DUPLICATE GUARD: same asset+user+mode mein already open position hai?
+    duplicate = Position.objects.filter(
+        user=instance.user,
+        asset=instance.asset,
+        mode=instance.mode,
+        status="open",
+    ).exclude(opening_order=instance).first()
+    if duplicate:
+        import logging
+        logging.getLogger(__name__).warning(
+            f"Duplicate position blocked | Asset: {instance.asset.symbol} | "
+            f"Existing: {duplicate.id} | Blocked order: {instance.id}"
+        )
         return
     
     try:
