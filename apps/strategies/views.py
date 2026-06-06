@@ -1325,6 +1325,12 @@ class CapitalWarningView(StrategyOwnerMixin, APIView):
         elif instrument == "futures":
             estimated_cost = price * lot_size * lots * 0.15
             premium_source = "margin_estimate"
+        elif instrument == "perp":
+            _contract_value = float(strategy.risk_config.get("contract_value", 0.01))
+            _leverage = float(strategy.risk_config.get("leverage", 10))
+            _usdt_margin = _contract_value * price * lots / _leverage
+            estimated_cost = round(_usdt_margin * 84.0, 2)
+            premium_source = "margin_estimate"
         else:
             estimated_cost = price * lots
             premium_source = "spot_price"
@@ -1578,6 +1584,15 @@ def _get_available_capital(strategy) -> float:
 
         if _user and _user != strategy.user:
             # Global strategy — request user ka broker lo
+            # ✅ FIX: Delta account pehle check karo (api_key based)
+            _delta_acc = BrokerAccount.objects.filter(
+                user=_user, broker="delta",
+                is_active=True, is_verified=True,
+            ).exclude(api_key__isnull=True).exclude(api_key="").first()
+            if _delta_acc:
+                usdt_bal = _get_delta_balance(_delta_acc)
+                return round(usdt_bal * 84.0, 2)
+
             broker_account = (
                 BrokerAccount.objects
                 .filter(user=_user, is_active=True, is_verified=True)
