@@ -1284,17 +1284,23 @@ class BrokerFundsView(APIView):
     def _delta_funds(self, request):
         try:
             from broker_adapters.factory import BrokerAdapterFactory
-            adapter = BrokerAdapterFactory.get_adapter(request.user)
-            if adapter is None:
+            # ✅ FIX: _get_account() use karo — get_adapter(user) Dhan return kar deta tha
+            account = self._get_account(request.user, "delta")
+            if account is None:
                 return Response({
                     "source": "delta", "available": 0, "used_margin": 0,
                     "total": 0, "token_valid": False,
                     "error": "Delta account connected nahi hai",
                 }, status=200)
+            adapter = BrokerAdapterFactory.get_adapter_for_account(account)
             funds = adapter.get_funds()
             return Response({
-                "source": "delta", "available": funds.available,
-                "used_margin": funds.used, "total": funds.total,
+                "source": "delta",
+                "available": round(float(funds.available) * 84.0, 2),
+                "used_margin": round(float(funds.used) * 84.0, 2),
+                "total": round(float(funds.total) * 84.0, 2),
+                "currency": "INR",
+                "available_usdt": funds.available,
                 "token_valid": True, "error": None,
             })
         except Exception as e:

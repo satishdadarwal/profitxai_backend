@@ -141,7 +141,6 @@ class PositionSerializer(serializers.ModelSerializer):
     
     # Computed P&L percentage
     pnl_percentage = serializers.DecimalField(
-        source='pnl_percentage',
         max_digits=10,
         decimal_places=2,
         read_only=True
