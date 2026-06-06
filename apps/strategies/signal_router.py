@@ -198,11 +198,15 @@ def _pick_best_account_for_user(
         .order_by("-updated_at")
     )
 
-    # Filter: dhan ke liye dhan_access_token check karo
+    # Filter: broker ke hisaab se token check karo
     valid_accounts = []
     for acc in accounts:
         if acc.broker == "dhan":
             if not getattr(acc, "dhan_access_token", ""):
+                continue
+        elif acc.broker == "delta":
+            # Delta: api_key + api_secret use karta hai, access_token nahi
+            if not getattr(acc, "api_key", "") or not getattr(acc, "api_secret", ""):
                 continue
         else:
             if not getattr(acc, "access_token", ""):
@@ -299,6 +303,10 @@ def _route_global_strategy(strategy, signal):
         # Token validity check
         if acc.broker == "dhan":
             if not getattr(acc, "dhan_access_token", ""):
+                continue
+        elif acc.broker == "delta":
+            # Delta: api_key + api_secret use karta hai, access_token nahi
+            if not getattr(acc, "api_key", "") or not getattr(acc, "api_secret", ""):
                 continue
         else:
             if not getattr(acc, "access_token", ""):
@@ -1281,12 +1289,16 @@ def _place_delta_order(strategy, signal, instrument_type: str, user=None, accoun
             qty=qty,
             product_type=product_type,
             current_price=current_price,
+            sl_price=sl_price,
+            tp_price=tgt_price,
         )
 
         if delta_resp.get("success"):
             exchange_order_id = str(delta_resp.get("result", {}).get("id", ""))
+            # ✅ FIX: Proxy object nahi chalega — real Strategy instance chahiye
+            _real_strategy = getattr(strategy, '_real', strategy)
             order = create_order(
-                strategy=strategy,
+                strategy=_real_strategy,
                 symbol=symbol,
                 side=signal_type,
                 quantity=qty,
@@ -1315,32 +1327,20 @@ def _place_delta_order(strategy, signal, instrument_type: str, user=None, accoun
         logger.exception("Delta order exception | %s", exc)
         return None
 
-def _call_delta_api(account, symbol, side, qty, product_type, current_price):
+def _delta_sign_and_post(api_key, api_secret, path, payload):
+    """Delta India API — sign karke POST karo."""
     import hashlib, hmac, json, time
     import requests
 
-    api_key    = account.api_key
-    api_secret = account.api_secret
-
     method    = "POST"
-    path      = "/v2/orders"
     timestamp = str(int(time.time()))
-
-    payload = {
-        "product_id": _get_delta_product_id(_to_delta_symbol(symbol, product_type)),
-        "size":       qty,
-        "side":       side,
-        "order_type": "market_order",
-        "time_in_force": "gtc",
-    }
-
-    body_str = json.dumps(payload)
-    signature_data = method + timestamp + path + body_str
+    body_str  = json.dumps(payload)
+    sig_data  = method + timestamp + path + body_str
 
     signature = hmac.new(
         key=api_secret.encode(),
-        msg=signature_data.encode(),
-        digestmod=hashlib.sha256
+        msg=sig_data.encode(),
+        digestmod=hashlib.sha256,
     ).hexdigest()
 
     headers = {
@@ -1350,8 +1350,6 @@ def _call_delta_api(account, symbol, side, qty, product_type, current_price):
         "Content-Type": "application/json",
         "User-Agent":   "python-rest-client",
     }
-
-    # ✅ India URL + data= use karo
     resp = requests.post(
         "https://api.india.delta.exchange" + path,
         data=body_str,
@@ -1359,6 +1357,73 @@ def _call_delta_api(account, symbol, side, qty, product_type, current_price):
         timeout=10,
     )
     return resp.json()
+
+
+def _call_delta_api(account, symbol, side, qty, product_type, current_price,
+                    sl_price=None, tp_price=None):
+    """
+    Delta India pe order place karo.
+    ✅ SL/TP bracket orders bhi bhejo agar sl_price/tp_price pass kiye hain.
+    """
+    api_key    = account.api_key
+    api_secret = account.api_secret
+    product_id = _get_delta_product_id(_to_delta_symbol(symbol, product_type))
+
+    # ── Step 1: Main market order ─────────────────────────────────
+    payload = {
+        "product_id": product_id,
+        "size":        qty,
+        "side":        side,
+        "order_type":  "market_order",
+        "time_in_force": "gtc",
+    }
+    resp = _delta_sign_and_post(api_key, api_secret, "/v2/orders", payload)
+    logger.info("Delta market order resp | symbol=%s | side=%s | qty=%d | resp=%s",
+                symbol, side, qty, resp.get("success"))
+
+    if not resp.get("success"):
+        return resp
+
+    # ── Step 2: SL order ──────────────────────────────────────────
+    if sl_price:
+        sl_side = "sell" if side == "buy" else "buy"
+        sl_payload = {
+            "product_id":    product_id,
+            "size":           qty,
+            "side":           sl_side,
+            "order_type":     "limit_order",
+            "limit_price":    str(round(sl_price, 2)),
+            "stop_price":     str(round(sl_price, 2)),
+            "time_in_force":  "gtc",
+            "reduce_only":    True,
+            "close_on_trigger": True,
+        }
+        import time as _time
+        _time.sleep(1.5)  # Position fill hone ka wait karo
+        sl_resp = _delta_sign_and_post(api_key, api_secret, "/v2/orders", sl_payload)
+        logger.info("Delta SL order | symbol=%s | sl_price=%s | success=%s",
+                    symbol, sl_price, sl_resp.get("success"))
+        if not sl_resp.get("success"):
+            logger.warning("Delta SL order FAILED | resp=%s", sl_resp)
+
+    # ── Step 3: TP order ──────────────────────────────────────────
+    if tp_price:
+        tp_side = "sell" if side == "buy" else "buy"
+        tp_payload = {
+            "product_id":   product_id,
+            "size":          qty,
+            "side":          tp_side,
+            "order_type":    "limit_order",
+            "limit_price":   str(round(tp_price, 2)),
+            "time_in_force": "gtc",
+        }
+        tp_resp = _delta_sign_and_post(api_key, api_secret, "/v2/orders", tp_payload)
+        logger.info("Delta TP order | symbol=%s | tp_price=%s | success=%s",
+                    symbol, tp_price, tp_resp.get("success"))
+        if not tp_resp.get("success"):
+            logger.warning("Delta TP order FAILED | resp=%s", tp_resp)
+
+    return resp
 
 
 

@@ -599,13 +599,26 @@ class DeltaExecutionAdapter(ExecutionAdapter):
             # instrument_type — strategy se milega agar available ho
             product_type = "perp"  # default perpetual
 
+            # ✅ FIX: risk_config.qty se cap lagao — ICT engine position_size bahut bada ho sakta hai
+            from apps.strategies.models import Strategy as _S
+            _strat = getattr(order, '_strategy', None)
+            _max_qty = 1
+            try:
+                if _strat:
+                    _max_qty = int(_strat.risk_config.get('qty', 1))
+            except Exception:
+                pass
+            _safe_qty = min(int(order.size) or 1, _max_qty)
+
             resp = _call_delta_api(
                 account=account,
                 symbol=order.symbol,
                 side=side,
-                qty=int(order.size) or 1,
+                qty=_safe_qty,
                 product_type=product_type,
                 current_price=float(order.price),
+                sl_price=float(order.stop_loss) if order.stop_loss else None,
+                tp_price=float(order.take_profit) if order.take_profit else None,
             )
 
             # Delta API response: {"success": true, "result": {"id": 12345}}
@@ -667,6 +680,13 @@ def execute_cycle_ict(strategy, symbol: str) -> dict:
     """
     from apps.brokers.models import BrokerAccount
     from apps.ict_engine.dispatcher import Dispatcher
+
+    # ✅ FIX: DB se fresh strategy reload karo
+    try:
+        from apps.strategies.models import Strategy as _SM
+        strategy = _SM.objects.get(pk=strategy.pk)
+    except Exception:
+        pass
 
     config = RunnerConfig(
         timeframes=["1D", "4H", "1H", "15m"],
@@ -765,10 +785,19 @@ def execute_cycle_ict(strategy, symbol: str) -> dict:
         dry_run=config.dry_run,
     )
 
+    # ✅ FIX: risk_config.qty se max position size cap karo
+    _max_qty = int(strategy.risk_config.get("qty", 1))
+    _risk_pct = float(strategy.risk_config.get("risk_per_trade_pct", 1.0))
+    _capital = float(strategy.risk_config.get("capital", 10000))
+    _risk_params = RiskParameters(
+        account_balance=_capital,
+        risk_per_trade_pct=_risk_pct,
+    )
     runner = StrategyRunner(
         provider=provider,
         dispatcher=dispatcher,
         config=config,
+        risk_params=_risk_params,
     )
 
     try:
