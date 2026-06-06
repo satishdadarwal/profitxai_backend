@@ -1602,6 +1602,18 @@ def _get_available_capital(strategy) -> float:
             broker_account = strategy.broker
             if not broker_account:
                 _fallback_user = _user or strategy.user
+                # ✅ FIX: Delta account check karo — global strategy mein subscriber ka account
+                # strategy.user = creator (Chanchal), subscriber = Satish
+                # Isliye sab active Delta accounts check karo
+                from django.contrib.auth import get_user_model as _gum
+                _User = _gum()
+                _all_delta = BrokerAccount.objects.filter(
+                    broker="delta", is_active=True, is_verified=True,
+                ).exclude(api_key__isnull=True).exclude(api_key="")
+                if _all_delta.exists():
+                    _delta_acc = _all_delta.first()
+                    usdt_bal = _get_delta_balance(_delta_acc)
+                    return round(usdt_bal * 84.0, 2)
                 broker_account = (
                     BrokerAccount.objects
                     .filter(user=_fallback_user, is_active=True, is_verified=True)
@@ -1644,7 +1656,22 @@ def _get_available_capital(strategy) -> float:
                         if val > 0:
                             return val
         elif broker_slug == "delta":
-            return _get_delta_balance(broker_account)
+            # ✅ FIX: USDT → INR convert karo
+            usdt_bal = _get_delta_balance(broker_account)
+            inr_rate = 84.0  # approximate USD→INR rate
+            return usdt_bal * inr_rate
+
+        # ✅ FIX: broker_slug None ho toh request user ka Delta account check karo
+        if broker_account is None or broker_slug is None:
+            from apps.brokers.models import BrokerAccount as _BA
+            _check_user = _user or strategy.user
+            _delta_acc = _BA.objects.filter(
+                user=_check_user, broker="delta",
+                is_active=True, is_verified=True,
+            ).first()
+            if _delta_acc:
+                usdt_bal = _get_delta_balance(_delta_acc)
+                return usdt_bal * 84.0
 
     except Exception as e:
         logger.warning("Capital fetch failed: %s", e)
