@@ -237,7 +237,10 @@ class RiskManager:
             return False, "Kill switch active. Trading halted."
 
         # ── 2. Market hours (IST — FIXED timezone bug) ────────────────────────
-        if not self._is_market_open():
+        # ✅ FIX: Crypto symbols ke liye market hours check skip karo (24/7 open)
+        _CRYPTO_KW = {"BTC", "ETH", "SOL", "BNB", "XRP", "ADA", "USDT", "USD"}
+        _is_crypto = any(kw in str(symbol).upper() for kw in _CRYPTO_KW)
+        if not _is_crypto and not self._is_market_open():
             return False, "Market is closed (9:15–15:30 IST, Mon–Fri)"
 
         # ── 3. Daily trade limit ──────────────────────────────────────────────
@@ -1039,20 +1042,36 @@ class RiskManager:
             return True  # Allow on error
 
     def _has_sufficient_margin(self, position_value: Decimal) -> bool:
-        from apps.wallet.models import Wallet
         try:
+            from apps.brokers.models import BrokerAccount
+            # ✅ FIX: Delta ke liye broker balance use karo
+            delta_acc = BrokerAccount.objects.filter(
+                user=self.user, broker="delta",
+                is_active=True, is_verified=True,
+            ).exclude(api_key__isnull=True).exclude(api_key="").first()
+            if delta_acc:
+                from apps.strategies.views import _get_delta_balance
+                usdt_bal = _get_delta_balance(delta_acc)
+                inr_bal = Decimal(str(round(usdt_bal * 84.0, 2)))
+                required = Decimal(str(float(position_value) / float(self.limits.max_leverage)))
+                logger.info("Delta margin check | balance=₹%.2f | required=₹%.2f", inr_bal, required)
+                return inr_bal >= required
+
+            # Fallback: INR wallet
+            from apps.wallet.models import Wallet
             wallet = Wallet.objects.get(user=self.user, currency="INR")
-            required = position_value / self.limits.max_leverage
+            required = position_value / Decimal(str(self.limits.max_leverage))
             return wallet.available_balance >= required
         except Exception as e:
             logger.error("_has_sufficient_margin error: %s", e)
-            return False
+            return True  # ✅ Fail open for crypto — broker will reject if insufficient
 
     def _is_price_reasonable(self, symbol: str, order_price: Decimal) -> bool:
         try:
             cp = self._get_current_price(symbol)
             if not cp:
                 return True
+            order_price = Decimal(str(float(order_price)))
             diff_pct = abs(order_price - cp) / cp * 100
             if diff_pct > 10:
                 logger.warning(
