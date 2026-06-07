@@ -14,7 +14,11 @@ from apps.options.serializers import OptionsPredictionSerializer
 @permission_classes([permissions.AllowAny])
 def latest_options_prediction(request, symbol: str):
     try:
-        prediction = OptionsPrediction.objects.filter(symbol__name__iexact=symbol).order_by("-created_at").first()
+        from django.utils import timezone
+        today = timezone.now().date()
+        prediction = OptionsPrediction.objects.filter(symbol__name__iexact=symbol, expiry__gte=today).order_by("-created_at").first()
+        if not prediction:
+            prediction = OptionsPrediction.objects.filter(symbol__name__iexact=symbol).order_by("-created_at").first()
         if not prediction:
             return Response({"detail": "No prediction found."}, status=status.HTTP_404_NOT_FOUND)
 
