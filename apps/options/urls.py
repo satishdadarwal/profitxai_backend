@@ -167,6 +167,7 @@ urlpatterns = [
     # GET /api/v1/options/snapshots/<symbol_id>/?limit=20
     # Get option price snapshots by symbol ID
 
+    path("greeks/", views.OptionGreeksView.as_view(), name="option-greeks"),
     path(
         "predictions/<str:symbol>/",
         latest_options_prediction,

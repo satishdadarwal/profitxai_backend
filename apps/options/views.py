@@ -1232,3 +1232,51 @@ def _get_broker_order_id(trade: OptionTrade) -> str | None:
         return order.broker_order_id if order else None
     except Exception:
         return None
+
+class OptionGreeksView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        symbol = request.query_params.get("symbol", "NIFTY")
+        from apps.options.nse_fetcher import fetch_nse_option_chain
+        from apps.options.black_scholes import greeks_from_chain
+
+        try:
+            data = fetch_nse_option_chain(symbol=symbol, user=request.user)
+            spot = data.get("spot", 0)
+            chain = data.get("chain", [])
+
+            # ATM row dhundo
+            atm_row = None
+            min_diff = float("inf")
+            for row in chain:
+                diff = abs(row["strike"] - spot)
+                if diff < min_diff:
+                    min_diff = diff
+                    atm_row = row
+
+            if not atm_row:
+                return Response({"error": "No ATM row found"}, status=400)
+
+            expiries = data.get("expiries", [])
+            expiry_str = expiries[0] if expiries else ""
+
+            ce = atm_row.get("CE", {})
+            pe = atm_row.get("PE", {})
+
+            greeks = greeks_from_chain(
+                spot=spot,
+                strike=atm_row["strike"],
+                expiry_str=expiry_str,
+                ce_ltp=ce.get("ltp", 0),
+                pe_ltp=pe.get("ltp", 0),
+                ce_iv=ce.get("iv", 0),
+                pe_iv=pe.get("iv", 0),
+            )
+            greeks["symbol"] = symbol
+            greeks["spot"] = spot
+            return Response({"success": True, "greeks": greeks})
+
+        except Exception as e:
+            logger.error("Greeks failed | %s | %s", symbol, e)
+            return Response({"error": str(e)}, status=500)

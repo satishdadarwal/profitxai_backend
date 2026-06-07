@@ -155,7 +155,7 @@ class GlobalCuesView(APIView):
     def get(self, request):
         from apps.predictions.models import GlobalCueSnapshot
 
-        latest = GlobalCueSnapshot.objects.first()
+        latest = GlobalCueSnapshot.objects.order_by("-date").first()
         if not latest:
             return Response({"error": "No global cues available"}, status=404)
 
