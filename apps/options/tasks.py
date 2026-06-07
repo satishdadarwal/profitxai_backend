@@ -230,3 +230,48 @@ def place_broker_order(self, order_data: dict):
     except Exception as exc:
         logger.error(f"place_broker_order failed: {exc}")
         raise self.retry(exc=exc, countdown=5)
+
+@shared_task(name="options.generate_options_predictions", queue="default")
+def generate_options_predictions():
+    """Run every 30 min during market hours."""
+    from apps.options.options_prediction import generate_options_prediction
+    from django.contrib.auth import get_user_model
+    User = get_user_model()
+
+    user = User.objects.filter(is_staff=True).first() or User.objects.first()
+    symbols = ["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"]
+    results = []
+
+    for symbol in symbols:
+        try:
+            pred = generate_options_prediction(symbol_name=symbol, user=user)
+            if pred:
+                results.append({"symbol": symbol, "direction": pred.direction})
+                logger.info("Options prediction | %s | %s", symbol, pred.direction)
+        except Exception as e:
+            logger.error("Options prediction failed | %s | %s", symbol, e)
+
+    return results
+
+
+@shared_task(name="options.generate_options_predictions", queue="default")
+def generate_options_predictions():
+    """Run every 30 min during market hours."""
+    from apps.options.options_prediction import generate_options_prediction
+    from django.contrib.auth import get_user_model
+    User = get_user_model()
+
+    user = User.objects.filter(is_staff=True).first() or User.objects.first()
+    symbols = ["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"]
+    results = []
+
+    for symbol in symbols:
+        try:
+            pred = generate_options_prediction(symbol_name=symbol, user=user)
+            if pred:
+                results.append({"symbol": symbol, "direction": pred.direction})
+                logger.info("Options prediction | %s | %s", symbol, pred.direction)
+        except Exception as e:
+            logger.error("Options prediction failed | %s | %s", symbol, e)
+
+    return results

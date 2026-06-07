@@ -10,6 +10,7 @@ from apps.options.models import (
     OptionSnapshot,
     OptionSymbol,
     OptionTrade,
+    OptionsPrediction,
 )
 
 # Paper trading app models
@@ -540,4 +541,17 @@ class BacktestRunSerializer(serializers.ModelSerializer):
             "created_at",
             "completed_at",
             "trades",
+        ]
+
+class OptionsPredictionSerializer(serializers.ModelSerializer):
+    symbol_name = serializers.CharField(source="symbol.name", read_only=True)
+
+    class Meta:
+        model = OptionsPrediction
+        fields = [
+            "id", "symbol_name", "expiry", "direction", "confidence_pct",
+            "signal_score", "expected_range_low", "expected_range_high",
+            "max_pain", "call_wall", "put_wall", "breakeven_pts",
+            "up_prob", "flat_prob", "down_prob", "suggested_strategy",
+            "strategy_legs", "pcr_oi", "iv_rank", "signal_factors", "created_at",
         ]

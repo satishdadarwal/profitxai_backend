@@ -116,3 +116,27 @@ def update_prediction_outcomes():
 
         except Exception as e:
             logger.error("Outcome update failed | %s | %s", pred.symbol, e)
+
+
+@shared_task(name="predictions.generate_hourly_predictions", queue="default")
+def generate_hourly_predictions():
+    """Run every hour during market hours (9:15 AM - 3:30 PM IST)."""
+    from apps.predictions.hourly_engine import generate_hourly_prediction
+
+    user = User.objects.filter(is_staff=True).first() or User.objects.first()
+    if not user:
+        logger.error("No user found for hourly prediction")
+        return
+
+    results = []
+    for symbol in DEFAULT_SYMBOLS:
+        try:
+            prediction = generate_hourly_prediction(symbol=symbol, user=user)
+            if prediction:
+                results.append({"symbol": symbol, "bias": prediction.bias})
+                logger.info("Hourly prediction | %s | %s", symbol, prediction.bias)
+        except Exception as e:
+            logger.error("Hourly prediction failed | %s | %s", symbol, e)
+
+    logger.info("Hourly predictions complete | %d symbols", len(results))
+    return results

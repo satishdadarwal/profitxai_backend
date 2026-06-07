@@ -54,6 +54,7 @@ class DailyPrediction(models.Model):
 
     # ── Final Score ───────────────────────────────────────
     final_score     = models.FloatField(default=0)   # 0-100
+    accuracy_score  = models.FloatField(null=True, blank=True)  # post-evaluation score
     summary         = models.TextField(blank=True)
     trade_plan      = models.JSONField(default=dict)
 
@@ -67,6 +68,53 @@ class DailyPrediction(models.Model):
 
     def __str__(self):
         return f"{self.symbol} | {self.prediction_date} | {self.bias} | {self.final_score:.0f}"
+
+
+class HourlyPrediction(models.Model):
+    """Hourly intraday prediction — generated every 1H during market hours."""
+
+    class Bias(models.TextChoices):
+        BULLISH = "bullish", "Bullish"
+        BEARISH = "bearish", "Bearish"
+        NEUTRAL = "neutral", "Neutral"
+
+    id              = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    symbol          = models.CharField(max_length=50)
+    prediction_hour = models.DateTimeField()
+    generated_at    = models.DateTimeField(auto_now_add=True)
+
+    bias            = models.CharField(max_length=10, choices=Bias.choices)
+    confidence_pct  = models.FloatField(default=0)
+    confluence_score = models.FloatField(default=0)
+
+    entry_zone_high = models.FloatField(null=True)
+    entry_zone_low  = models.FloatField(null=True)
+    stop_loss       = models.FloatField(null=True)
+    target_1        = models.FloatField(null=True)
+    target_2        = models.FloatField(null=True)
+
+    key_levels      = models.JSONField(default=list)
+    ict_breakdown   = models.JSONField(default=dict)
+    trade_plan      = models.JSONField(default=dict)
+    summary         = models.TextField(blank=True)
+
+    actual_close    = models.FloatField(null=True)
+    outcome         = models.CharField(
+        max_length=10,
+        choices=[("pending","Pending"),("hit","Hit"),("miss","Miss"),("expired","Expired")],
+        default="pending"
+    )
+    was_correct     = models.BooleanField(null=True)
+
+    class Meta:
+        unique_together = ("symbol", "prediction_hour")
+        ordering = ["-prediction_hour"]
+        indexes = [
+            models.Index(fields=["symbol", "prediction_hour"]),
+        ]
+
+    def __str__(self):
+        return f"{self.symbol} | {self.prediction_hour} | {self.bias} | {self.confidence_pct:.0f}%"
 
 
 class GlobalCueSnapshot(models.Model):

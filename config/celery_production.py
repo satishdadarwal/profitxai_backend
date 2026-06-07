@@ -229,6 +229,14 @@ app.conf.task_routes = {
 #  └───────────────────────────────────────────────────────────────┘
 # ────────────────────────────────────────────────────────────────────
 beat_schedule = {
+    "hourly-predictions": {
+        "task": "predictions.generate_hourly_predictions",
+        "schedule": crontab(minute=15, hour="9-15"),
+    },
+    "options-predictions": {
+        "task": "options.generate_options_predictions",
+        "schedule": crontab(minute="0,30", hour="9-15"),
+    },
     # ── Live Trading ──────────────────────────────────────────────
     # NOTE: detect-live-signals aur expire-semi-auto-signals
     # settings_live_trading.py mein hain — yahan define NAHI karo (duplicate hoga)
@@ -298,6 +306,23 @@ beat_schedule = {
     "fyers-market-close-ws-stop": {
         "task": "apps.brokers.tasks.stop_all_feeds",
         "schedule": crontab(hour=15, minute=35),
+        "options": {"queue": "default", "priority": 5},
+    },
+
+    # ── Hours-based predictions and option chain jobs ─────────────
+    "generate-hourly-predictions": {
+        "task": "predictions.generate_hourly_predictions",
+        "schedule": crontab(minute=0),
+        "options": {"queue": "default", "priority": 5},
+    },
+    "update-hourly-outcomes": {
+        "task": "predictions.update_hourly_outcomes",
+        "schedule": crontab(minute=30),
+        "options": {"queue": "default", "priority": 5},
+    },
+    "fetch-all-option-chains": {
+        "task": "options.fetch_all_chains",
+        "schedule": crontab(minute="*/5"),
         "options": {"queue": "default", "priority": 5},
     },
 

@@ -218,3 +218,72 @@ class BacktestRun(models.Model):
 
     class Meta:
         ordering = ["-created_at"]
+
+
+class IVHistory(models.Model):
+    symbol = models.ForeignKey(OptionSymbol, on_delete=models.CASCADE, related_name="iv_history")
+    date = models.DateField()
+    atm_iv = models.FloatField()
+    iv_rank = models.FloatField(null=True, blank=True)
+
+    class Meta:
+        unique_together = ("symbol", "date")
+        ordering = ["-date"]
+
+    def __str__(self):
+        return f"{self.symbol.name} | {self.date} | IV={self.atm_iv}"
+
+
+class OptionChainSnapshot(models.Model):
+    symbol = models.ForeignKey(OptionSymbol, on_delete=models.CASCADE, related_name="chain_snapshots")
+    expiry = models.DateField()
+    spot = models.FloatField()
+    pcr_oi = models.FloatField(null=True, blank=True)
+    pcr_volume = models.FloatField(null=True, blank=True)
+    max_pain = models.FloatField(null=True, blank=True)
+    atm_strike = models.IntegerField(null=True, blank=True)
+    atm_ce_iv = models.FloatField(null=True, blank=True)
+    atm_pe_iv = models.FloatField(null=True, blank=True)
+    vix = models.FloatField(null=True, blank=True)
+    call_wall = models.FloatField(null=True, blank=True)
+    put_wall = models.FloatField(null=True, blank=True)
+    chain_data = models.JSONField(default=list)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.symbol.name} | {self.expiry} | spot={self.spot}"
+
+
+class OptionsPrediction(models.Model):
+    DIRECTION_CHOICES = [("bullish", "Bullish"), ("bearish", "Bearish"), ("neutral", "Neutral")]
+
+    symbol = models.ForeignKey(OptionSymbol, on_delete=models.CASCADE, related_name="predictions")
+    snapshot = models.ForeignKey(OptionChainSnapshot, on_delete=models.SET_NULL, null=True, blank=True)
+    expiry = models.DateField()
+    direction = models.CharField(max_length=10, choices=DIRECTION_CHOICES)
+    confidence_pct = models.FloatField(default=0)
+    signal_score = models.FloatField(default=0)
+    expected_range_low = models.FloatField(null=True, blank=True)
+    expected_range_high = models.FloatField(null=True, blank=True)
+    max_pain = models.FloatField(null=True, blank=True)
+    call_wall = models.FloatField(null=True, blank=True)
+    put_wall = models.FloatField(null=True, blank=True)
+    breakeven_pts = models.FloatField(null=True, blank=True)
+    up_prob = models.FloatField(default=0)
+    flat_prob = models.FloatField(default=0)
+    down_prob = models.FloatField(default=0)
+    suggested_strategy = models.CharField(max_length=50, null=True, blank=True)
+    strategy_legs = models.JSONField(default=list)
+    pcr_oi = models.FloatField(null=True, blank=True)
+    iv_rank = models.FloatField(null=True, blank=True)
+    signal_factors = models.JSONField(default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.symbol.name} | {self.direction} | {self.created_at:%d %b %H:%M}"

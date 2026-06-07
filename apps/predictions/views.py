@@ -4,6 +4,7 @@ import logging
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+from rest_framework import permissions
 from django.utils import timezone
 
 logger = logging.getLogger(__name__)
@@ -209,3 +210,37 @@ class PredictionAccuracyView(APIView):
             "accuracy_pct":  accuracy,
             "by_confidence": by_confidence,
         })
+
+class HourlyPredictionListView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        from apps.predictions.models import HourlyPrediction
+        symbol = request.query_params.get("symbol")
+        qs = HourlyPrediction.objects.all().order_by("-prediction_hour")[:48]
+        if symbol:
+            qs = HourlyPrediction.objects.filter(symbol__iexact=symbol).order_by("-prediction_hour")[:48]
+        data = list(qs.values(
+            "id", "symbol", "prediction_hour", "bias",
+            "confidence_pct", "confluence_score",
+            "entry_zone_high", "entry_zone_low",
+            "stop_loss", "target_1", "target_2",
+            "summary", "ict_breakdown", "trade_plan",
+        ))
+        return Response(data)
+
+
+class HourlyAccuracyView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        from apps.predictions.models import HourlyPrediction
+        from django.db.models import Count, Q
+        symbol = request.query_params.get("symbol")
+        qs = HourlyPrediction.objects.all()
+        if symbol:
+            qs = qs.filter(symbol__iexact=symbol)
+        total = qs.count()
+        correct = qs.filter(was_correct=True).count()
+        accuracy = round((correct / total) * 100, 1) if total else 0
+        return Response({"total": total, "correct": correct, "accuracy_pct": accuracy})

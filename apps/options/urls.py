@@ -6,6 +6,7 @@
 
 from django.urls import path
 from . import views
+from .prediction_views import latest_options_prediction, refresh_options_prediction
 
 app_name = 'options'
 
@@ -165,4 +166,15 @@ urlpatterns = [
     ),
     # GET /api/v1/options/snapshots/<symbol_id>/?limit=20
     # Get option price snapshots by symbol ID
+
+    path(
+        "predictions/<str:symbol>/",
+        latest_options_prediction,
+        name="options-prediction-latest",
+    ),
+    path(
+        "predictions/<str:symbol>/refresh/",
+        refresh_options_prediction,
+        name="options-prediction-refresh",
+    ),
 ]

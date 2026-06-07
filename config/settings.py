@@ -244,6 +244,18 @@ CELERY_BEAT_SCHEDULE = {
         "task": "predictions.update_prediction_outcomes",
         "schedule": crontab(hour=15, minute=35),
     },
+    "generate-hourly-predictions": {
+        "task": "predictions.generate_hourly_predictions",
+        "schedule": crontab(minute=0),
+    },
+    "update-hourly-outcomes": {
+        "task": "predictions.update_hourly_outcomes",
+        "schedule": crontab(minute=30),
+    },
+    "fetch-all-option-chains": {
+        "task": "options.fetch_all_chains",
+        "schedule": crontab(minute="*/5"),
+    },
     # ── Options SL/TP check ─────────────────────────────────
     "options-sltp-check": {
         "task": "apps.options.tasks.update_spot_and_check_sltp",
