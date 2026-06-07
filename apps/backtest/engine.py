@@ -675,3 +675,7 @@ class MTFTrendAlgo(BaseAlgo):
             reason=f"No MTF confluence | trend={trend} | setup_bull={setup_bull} | entry_bull={entry_bull}",
             metadata=meta,
         )
+
+from apps.backtest.algos.multi_confirm_options import MultiConfirmOptionsAlgo
+register("multi_confirm_options", MultiConfirmOptionsAlgo)
+
