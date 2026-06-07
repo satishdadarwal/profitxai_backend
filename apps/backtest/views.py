@@ -102,8 +102,8 @@ class BacktestRunView(APIView):
             timeframe=d.get("timeframe", "1h"),
             start_date=start_date,
             end_date=end_date,
-            initial_capital=d.get("initial_capital", 10000),
-            fee_rate=d.get("fee_rate", 0.001),
+            initial_capital=d.get("initial_capital") or d.get("strategy_params", {}).get("capital", 100000),
+            fee_rate=d.get("fee_rate") or d.get("strategy_params", {}).get("fee_rate", 0.001),
             status=BacktestRun.Status.PENDING,
         )
 

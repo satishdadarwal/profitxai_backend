@@ -945,74 +945,29 @@ def run_backtest_ict(
     ICT engine ko historical candles pe walk-forward run karo.
     strategies/services.py ke run_backtest() mein call karo.
     """
-    from fyers_apiv3 import fyersModel
-
-    from apps.brokers.models import BrokerAccount
-
-    account = BrokerAccount.objects.filter(
-        user=strategy.user,
-        broker="fyers",
-        is_active=True,
-        is_verified=True,
-    ).first()
-    if not account:
-        raise RuntimeError("Fyers account not connected")
-
-    fyers = fyersModel.FyersModel(
-        client_id=account.app_id,
-        token=account.access_token,
-        log_path="",
-        is_async=False,
-    )
-
-    from apps.brokers.symbol_mapper import normalize_for_fyers
-    fyers_sym = normalize_for_fyers(strategy.symbol)
-
+    # ✅ FIX: candle_service use karo — Delta/Fyers auto-detect
+    from apps.common.candle_service import fetch_candles
     from_dt = datetime.datetime.strptime(from_date, "%Y-%m-%d")
     to_dt = datetime.datetime.strptime(to_date, "%Y-%m-%d")
-    days = (to_dt - from_dt).days
-
-    if days > 365:
-        timeframe = "1D"
-    elif days > 180:
-        timeframe = "60"
-    else:
-        timeframe = "15"
-
-    resolution = timeframe
-
-    import datetime as _dt2
-
-    def _fetch_chunks(sym: str, res: str, f_date: str, t_date: str, max_days: int = 95) -> list:
-        all_candles: list = []
-        start = _dt2.datetime.strptime(f_date, "%Y-%m-%d")
-        end = _dt2.datetime.strptime(t_date, "%Y-%m-%d")
-        cur = start
-        while cur < end:
-            chunk_end = min(cur + _dt2.timedelta(days=max_days), end)
-            # ✅ FIX 1 (backtest): _params alag — cast() conflict gone
-            _params = {
-                "symbol": sym,
-                "resolution": res,
-                "date_format": "1",
-                "range_from": cur.strftime("%Y-%m-%d"),
-                "range_to": chunk_end.strftime("%Y-%m-%d"),
-                "cont_flag": "1",
-            }
-            r = cast(dict, fyers.history(data=_params))
-            if r.get("s") == "ok":
-                all_candles.extend(r.get("candles", []))
-            cur = chunk_end + _dt2.timedelta(days=1)
-        return all_candles
-
-    candles_raw = _fetch_chunks(fyers_sym, resolution, from_date, to_date)
-
-    if not candles_raw:
-        raise RuntimeError("Fyers history failed: no data returned")
-    if len(candles_raw) < 50:
-        raise RuntimeError("Insufficient candle data for backtest")
-
-    candles_raw = candles_raw[-1000:]
+    from_ts = int(from_dt.timestamp())
+    to_ts = int(datetime.datetime.combine(to_dt, datetime.time.max).timestamp())
+    sym = strategy.symbol
+    tf_str = str(timeframe).replace("m", "").replace("h", "0")
+    candle_bars = fetch_candles(
+        symbol=sym,
+        timeframe=tf_str,
+        from_ts=from_ts,
+        to_ts=to_ts,
+        source="auto",
+        strategy=strategy,
+    )
+    if not candle_bars:
+        raise RuntimeError(f"No candle data for {sym}")
+    if len(candle_bars) < 50:
+        raise RuntimeError(f"Insufficient candle data: {len(candle_bars)} bars")
+    candle_bars = candle_bars[-1000:]
+    candles_raw = [[c.timestamp, c.open, c.high, c.low, c.close, c.volume]
+                   for c in candle_bars]
 
     df_full = pd.DataFrame(
         candles_raw, columns=["ts", "open", "high", "low", "close", "volume"]

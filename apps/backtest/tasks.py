@@ -134,6 +134,7 @@ def run_backtest_task(self, run_id: str):
             strategy=strategy,
             initial_capital=int(run.initial_capital),  # ✅ fixed
             fee_rate=float(run.fee_rate),
+            symbol=run.symbol,  # ✅ actual symbol pass karo
         )
 
         total = len(df)
@@ -243,3 +244,97 @@ def _fetch_candles_fallback(symbol, timeframe, from_ts, to_ts):
     except Exception as e:
         logger.error("_fetch_candles_fallback error: %s", e)
         return None
+
+# ─────────────────────────────────────────────────────────────
+#  OPTIMIZER TASK
+# ─────────────────────────────────────────────────────────────
+@shared_task(bind=True, max_retries=0, time_limit=3600, soft_time_limit=3500,
+             name="backtest.run_optimizer_task", queue="strategies")
+def run_optimizer_task(self, optimizer_run_id: str):
+    from apps.backtest.models import OptimizerRun
+    from apps.backtest.optimizer import run_optimizer
+    from apps.common.candle_service import fetch_candles
+    from django.utils import timezone
+
+    try:
+        run = OptimizerRun.objects.get(pk=optimizer_run_id)
+    except OptimizerRun.DoesNotExist:
+        logger.error("OptimizerRun %s not found", optimizer_run_id)
+        return
+
+    run.status = OptimizerRun.Status.RUNNING
+    run.celery_task_id = self.request.id
+    run.save(update_fields=["status", "celery_task_id"])
+
+    try:
+        from_ts = int(datetime.datetime.combine(run.start_date, datetime.time.min).timestamp())
+        to_ts   = int(datetime.datetime.combine(run.end_date,   datetime.time.max).timestamp())
+
+        candles = fetch_candles(
+            symbol=run.symbol,
+            timeframe=str(run.timeframe),
+            from_ts=from_ts,
+            to_ts=to_ts,
+            source="auto",
+        )
+
+        if not candles:
+            raise ValueError(f"No candle data for {run.symbol}")
+        if len(candles) < 100:
+            raise ValueError(f"Insufficient data: {len(candles)} bars (min 100)")
+
+        logger.info("Optimizer task | %s | %s | bars=%d | combinations TBD",
+                    run.strategy_name, run.symbol, len(candles))
+
+        results = run_optimizer(
+            optimizer_run_id=optimizer_run_id,
+            candles=candles,
+            strategy_name=run.strategy_name,
+            param_ranges=run.param_ranges or {},
+            objective=run.objective,
+            train_ratio=run.train_ratio,
+            initial_capital=float(run.initial_capital),
+            symbol=run.symbol,
+        )
+
+        run.refresh_from_db()
+        run.best_params  = results.get("best_params")
+        run.best_score   = results.get("best_score")
+        run.all_results  = results.get("top_results")
+        run.total_combinations = results.get("total_combinations", 0)
+        run.status       = OptimizerRun.Status.DONE
+        run.completed_at = timezone.now()
+        run.progress     = 100
+        run.save(update_fields=[
+            "best_params", "best_score", "all_results",
+            "total_combinations", "status", "completed_at", "progress"
+        ])
+
+        # WS push
+        try:
+            from asgiref.sync import async_to_sync
+            from channels.layers import get_channel_layer
+            layer = get_channel_layer()
+            async_to_sync(layer.group_send)(
+                f"user_{run.user_id}",
+                {
+                    "type": "new_signal",
+                    "event": "optimizer_done",
+                    "optimizer_id": str(optimizer_run_id),
+                    "best_params": results.get("best_params"),
+                    "best_score": results.get("best_score"),
+                    "robust": results.get("robust", False),
+                }
+            )
+        except Exception as ws_err:
+            logger.warning("Optimizer WS push failed: %s", ws_err)
+
+        logger.info("Optimizer DONE %s | best_score=%.3f | combinations=%d",
+                    optimizer_run_id, results.get("best_score", 0),
+                    results.get("total_combinations", 0))
+
+    except Exception as e:
+        logger.error("Optimizer FAILED %s | %s", optimizer_run_id, e, exc_info=True)
+        run.status = OptimizerRun.Status.FAILED
+        run.error_message = str(e)
+        run.save(update_fields=["status", "error_message"])

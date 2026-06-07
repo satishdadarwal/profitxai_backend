@@ -469,10 +469,11 @@ class BacktestEngine:
         data = results.to_dict()
     """
 
-    def __init__(self, df, strategy, initial_capital=100_000, fee_rate=0.001):
+    def __init__(self, df, strategy, initial_capital=100_000, fee_rate=0.001, symbol=None):
         self.df = df
         self.strategy = strategy  # BaseAlgo instance
         self.initial_capital = initial_capital
+        self.symbol = symbol or "UNKNOWN"
         self.fee_rate = fee_rate
 
     def run(self) -> BacktestResult:
@@ -483,11 +484,12 @@ class BacktestEngine:
         warmup = 25
 
         # Get symbol from df name or use default
-        symbol = getattr(self.strategy, "name", "UNKNOWN")
+        # ✅ FIX: actual symbol use karo, strategy name nahi
+        symbol = self.symbol
 
         class _FakeStrategy:
             parameters = {}
-            symbol = "BACKTEST"
+            symbol = getattr(self, "_run_symbol", "BACKTEST")
             mode = "paper"
 
         fake_strat = _FakeStrategy()
@@ -525,7 +527,8 @@ class BacktestEngine:
                     strategy=fake_strat,
                     candles=candles,
                 )
-            except Exception:
+            except Exception as _e:
+                logger.warning("BacktestEngine signal error at bar %d: %s", i, _e)
                 continue
 
             if signal.signal_type not in ("buy", "sell"):

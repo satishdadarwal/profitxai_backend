@@ -978,62 +978,8 @@ def execute_silver_bullet_cycle(strategy, symbol: str) -> dict:
     except Exception as e:
         logger.warning("Duplicate check failed | %s", e)
 
-    # ✅ FIX 2 & 3: signal_router के through trade open करो
-    #
-    # WHY: Silver Bullet entry_price = SPOT price (जैसे 24500)
-    #      Options trade के लिए option premium चाहिए (जैसे ₹220)
-    #      signal_router._paper_option_trade() यह सब handle करता है:
-    #        - ATM option symbol fetch
-    #        - Real LTP से option premium
-    #        - Buyer/Seller SL/TP logic
-    #        - nifty_spot_at_entry automatically set
-    #
-    # Paper mode → signal_router → _place_paper_trade → _paper_option_trade
-    # Live mode  → signal_router → _place_fyers_order  → _fyers_options_order
-
-    try:
-        from apps.strategies.signal_router import route_and_place_order
-        from apps.strategies.models import StrategySignal as _SigModel
-
-        # Signal object बनाओ जो route_and_place_order expect करता है
-        # (StrategySignal instance की तरह duck-typed object)
-        class _SBSignalProxy:
-            """Lightweight proxy — StrategySignal जैसा interface"""
-            def __init__(self, _sig, _symbol, _meta):
-                self.symbol      = _symbol
-                _dir = _sig.direction.value
-                self.signal_type = "buy" if _dir == "long" else "sell"  # normalize for signal_router
-                self.price       = Decimal(str(_sig.entry_price))
-                self.metadata    = _meta
-
-        proxy_meta = sig.to_dict()
-        proxy_meta.update({
-            "stop_loss":    sig.stop_loss,
-            "take_profit_2": sig.take_profit2,
-            "take_profit_1": sig.take_profit1,
-            "position_size": sig.position_size,
-            "setup_type":   "ict_sb",
-            "strategy_id":  str(strategy.id),
-        })
-
-        proxy_signal = _SBSignalProxy(sig, symbol, proxy_meta)
-
-        logger.info(
-            "[%s] Routing via signal_router | mode=%s | instrument=%s",
-            symbol,
-            strategy.mode,
-            getattr(strategy, "instrument_type", "options"),
-        )
-
-        trade = route_and_place_order(strategy, proxy_signal)
-
-        if trade:
-            logger.info("[%s] Trade opened via router | id=%s", symbol, trade.id)
-        else:
-            logger.warning("[%s] route_and_place_order returned None", symbol)
-
-    except Exception as e:
-        logger.error("SB open_trade failed | %s", e, exc_info=True)
+    # Order placement is handled by services.py _handle_ict_signal
+    # Do NOT place order here — it causes duplicates
 
     # Save signal + WebSocket push
     try:
