@@ -14,6 +14,11 @@ DEFAULT_SYMBOLS = [
     "BSE:SENSEX-INDEX",
 ]
 
+CRYPTO_SYMBOLS = [
+    "BTCUSD",
+    "ETHUSD",
+]
+
 
 @shared_task(name="predictions.generate_eod_predictions", queue="default")
 def generate_eod_predictions():
@@ -129,7 +134,8 @@ def generate_hourly_predictions():
         return
 
     results = []
-    for symbol in DEFAULT_SYMBOLS:
+    all_symbols = DEFAULT_SYMBOLS + CRYPTO_SYMBOLS
+    for symbol in all_symbols:
         try:
             prediction = generate_hourly_prediction(symbol=symbol, user=user)
             if prediction:
