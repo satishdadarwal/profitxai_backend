@@ -30,7 +30,7 @@ def fetch_global_markets() -> dict:
         "nikkei":   "^N225",
         "hangseng": "^HSI",
         "vix_us":   "^VIX",
-        "vix_india":"^NSEBANK",
+        "vix_india":"^INDIAVIX",
         "crude_oil":"CL=F",
         "gold":     "GC=F",
         "dxy":      "DX-Y.NYB",

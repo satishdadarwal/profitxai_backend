@@ -66,20 +66,18 @@ def compute_iv_rank(symbol_obj, current_iv: float) -> Optional[float]:
     from datetime import date, timedelta
 
     one_year_ago = date.today() - timedelta(days=365)
-    history = IVHistory.objects.filter(
+    history = list(IVHistory.objects.filter(
         symbol=symbol_obj, date__gte=one_year_ago
-    ).values_list("atm_iv", flat=True)
-
-    if len(history) < 10:
-        return None
-
-    low_52w = min(history)
-    high_52w = max(history)
-
+    ).values_list("atm_iv", flat=True))
+    iv_pct = current_iv * 100 if current_iv < 1 else current_iv
+    history_pct = [v * 100 if v < 1 else v for v in history]
+    history_pct.append(iv_pct)
+    low_52w = min(history_pct) if len(history_pct) > 1 else 8.0
+    high_52w = max(history_pct) if len(history_pct) > 1 else 35.0
     if high_52w == low_52w:
         return 50.0
 
-    return round((current_iv - low_52w) / (high_52w - low_52w) * 100, 1)
+    return round((iv_pct - low_52w) / (high_52w - low_52w) * 100, 1)
 
 
 def derive_signal(snapshot) -> dict:

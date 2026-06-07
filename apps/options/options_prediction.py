@@ -66,7 +66,21 @@ def generate_options_prediction(symbol_name: str = "NIFTY", user=None) -> Option
         pass
 
     current_iv = atm_ce_iv or 0
-    iv_rank = compute_iv_rank(sym_obj, current_iv) if current_iv else None
+
+    if (not current_iv or current_iv == 0) and atm_row and spot:
+        import math
+        from datetime import datetime, date as date_
+        try:
+            exp_date = datetime.strptime(expiry_str, "%d-%m-%Y").date()
+            T = max((exp_date - date_.today()).days / 365, 0.001)
+            ce_ltp = atm_row["CE"].get("ltp", 0)
+            if ce_ltp and T > 0:
+                current_iv = round(ce_ltp / (spot * math.sqrt(T)) * math.sqrt(2 * math.pi), 4)
+                current_iv = max(0.05, min(current_iv, 1.0))
+        except Exception:
+            current_iv = 0.15
+
+    iv_rank = compute_iv_rank(sym_obj, current_iv * 100) if current_iv else None
 
     if current_iv:
         IVHistory.objects.update_or_create(
