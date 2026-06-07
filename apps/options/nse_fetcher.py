@@ -118,7 +118,7 @@ def fetch_nse_option_chain(symbol: str = "NIFTY", expiry_ts: str = "", user=None
         'chain':           sorted(chain_map.values(), key=lambda x: x['strike']),
     }
 
-    cache.set(cache_key, result, 30)  # 30 second cache
+    cache.set(cache_key, result, 120)  # 30 second cache
     return result
 
 

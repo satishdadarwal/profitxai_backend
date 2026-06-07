@@ -146,3 +146,16 @@ def generate_hourly_predictions():
 
     logger.info("Hourly predictions complete | %d symbols", len(results))
     return results
+
+
+@shared_task(name="predictions.update_global_cues", queue="default")
+def update_global_cues():
+    from apps.predictions.global_cues import fetch_fii_dii
+    from apps.predictions.models import GlobalCueSnapshot
+    from django.utils import timezone
+    data = fetch_fii_dii()
+    GlobalCueSnapshot.objects.update_or_create(
+        date=timezone.now().date(),
+        defaults={"fii_net": data.get("fii_net"), "dii_net": data.get("dii_net")}
+    )
+    logger.info("Global cues updated | fii=%s | dii=%s", data.get("fii_net"), data.get("dii_net"))

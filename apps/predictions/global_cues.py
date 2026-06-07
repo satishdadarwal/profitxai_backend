@@ -86,7 +86,7 @@ def fetch_fii_dii() -> dict:
             dii_net = 0.0
             for item in data:
                 category = item.get("category", "").upper()
-                net = float(item.get("netTurnover", 0) or 0)
+                net = float(item.get("netValue", item.get("netTurnover", 0)) or 0)
                 if "FII" in category or "FPI" in category:
                     fii_net += net
                 elif "DII" in category:
@@ -296,6 +296,8 @@ def fetch_all_global_cues(news_api_key: Optional[str] = None) -> dict:
     return {
         "markets": markets,
         "fii_dii": fii_dii,
+        "fii_net": fii_dii.get("fii_net"),
+        "dii_net": fii_dii.get("dii_net"),
         "news": news,
         "news_sentiment": news_sentiment,
         "global_score": global_score,

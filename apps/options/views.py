@@ -138,6 +138,7 @@ class OptionChainView(APIView):
                 "call_ask": row.get("CE", {}).get("ask", 0),
                 "call_change": row.get("CE", {}).get("ltpch", 0),
                 "call_change_percent": row.get("CE", {}).get("ltpchp", 0),
+                "call_oich": row.get("CE", {}).get("oich", 0),
                 
                 # Put Option Data
                 "put_ltp": row.get("PE", {}).get("ltp", 0),
@@ -148,6 +149,7 @@ class OptionChainView(APIView):
                 "put_ask": row.get("PE", {}).get("ask", 0),
                 "put_change": row.get("PE", {}).get("ltpch", 0),
                 "put_change_percent": row.get("PE", {}).get("ltpchp", 0),
+                "put_oich": row.get("PE", {}).get("oich", 0),
             }
             for row in chain
         ]
