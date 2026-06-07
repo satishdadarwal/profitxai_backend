@@ -762,3 +762,72 @@ class TradeJournalListView(generics.ListAPIView):
         if market_type:
             queryset = queryset.filter(market_type=market_type)
         return queryset
+
+
+class DailyPnlView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from django.utils import timezone
+        from .models import DailyPnlSnapshot, Trade, Position
+        today = timezone.now().date()
+        mode = request.query_params.get('mode', 'live')
+        market_type = request.query_params.get('market_type', 'all')
+        date_str = request.query_params.get('date', None)
+        target_date = timezone.datetime.strptime(date_str, '%Y-%m-%d').date() if date_str else today
+
+        # Snapshot se serve karo agar available
+        snap = DailyPnlSnapshot.objects.filter(
+            user=request.user, date=target_date, mode=mode, market_type=market_type
+        ).first()
+
+        if snap:
+            return Response({
+                'date': str(snap.date),
+                'mode': snap.mode,
+                'market_type': snap.market_type,
+                'realised': float(snap.realised_pnl),
+                'unrealised': float(snap.unrealised_pnl),
+                'fees': float(snap.fees),
+                'total_trades': snap.total_trades,
+                'wins': snap.wins,
+                'losses': snap.losses,
+                'source': 'snapshot',
+            })
+
+        # Snapshot nahi hai — live calculate karo (today only)
+        trades_qs = Trade.objects.filter(user=request.user, created_at__date=target_date)
+        if mode != 'all':
+            trades_qs = trades_qs.filter(mode=mode)
+        if market_type != 'all':
+            trades_qs = trades_qs.filter(market_type=market_type)
+
+        realised = 0.0
+        fees = 0.0
+        wins = 0
+        losses = 0
+        for t in trades_qs:
+            pnl = float(t.realized_pnl or 0)
+            fee = float(t.fee or 0)
+            realised += pnl - fee
+            fees += fee
+            if pnl > 0: wins += 1
+            elif pnl < 0: losses += 1
+
+        pos_qs = Position.objects.filter(user=request.user, status='open')
+        if mode != 'all':
+            pos_qs = pos_qs.filter(mode=mode)
+        unrealised = sum(float(p.unrealized_pnl or 0) for p in pos_qs)
+
+        return Response({
+            'date': str(target_date),
+            'mode': mode,
+            'market_type': market_type,
+            'realised': round(realised, 2),
+            'unrealised': round(unrealised, 2),
+            'fees': round(fees, 2),
+            'total_trades': trades_qs.count(),
+            'wins': wins,
+            'losses': losses,
+            'source': 'live',
+        })

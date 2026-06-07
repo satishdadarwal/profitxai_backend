@@ -631,3 +631,51 @@ def _notify_position_update(user_id: int, position):
         )
     except Exception as e:
         logger.error(f"Failed to send position update: {e}")
+
+@celery_app.task(bind=True, max_retries=2)
+def save_daily_pnl_snapshot(self, mode="live", market_type="all"):
+    from django.contrib.auth import get_user_model
+    from django.utils import timezone
+    from apps.orders.models import Trade, Position, DailyPnlSnapshot
+    User = get_user_model()
+    today = timezone.now().date()
+    users = User.objects.filter(is_active=True)
+    for user in users:
+        try:
+            trades_qs = Trade.objects.filter(user=user, created_at__date=today)
+            if mode != "all":
+                trades_qs = trades_qs.filter(mode=mode)
+            if market_type != "all":
+                trades_qs = trades_qs.filter(market_type=market_type)
+            realised = 0.0
+            fees = 0.0
+            wins = 0
+            losses = 0
+            for t in trades_qs:
+                pnl = float(t.realized_pnl or 0)
+                fee = float(t.fee or 0)
+                realised += pnl - fee
+                fees += fee
+                if pnl > 0:
+                    wins += 1
+                elif pnl < 0:
+                    losses += 1
+            pos_qs = Position.objects.filter(user=user, status="open")
+            if mode != "all":
+                pos_qs = pos_qs.filter(mode=mode)
+            unrealised = sum(float(p.unrealized_pnl or 0) for p in pos_qs)
+            DailyPnlSnapshot.objects.update_or_create(
+                user=user, date=today, mode=mode, market_type=market_type,
+                defaults=dict(
+                    realised_pnl=round(realised, 4),
+                    unrealised_pnl=round(unrealised, 4),
+                    fees=round(fees, 4),
+                    total_trades=trades_qs.count(),
+                    wins=wins,
+                    losses=losses,
+                )
+            )
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error("DailyPnlSnapshot error: " + str(e))
+    return "Snapshot done"

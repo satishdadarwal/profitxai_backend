@@ -1,6 +1,7 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import (
+    DailyPnlView,
     OrderViewSet,
     TradeViewSet,
     TradeJournalEntryViewSet,
@@ -39,6 +40,8 @@ urlpatterns = [
     path('trades/calculate-rr/', calculate_risk_reward, name='calculate-rr'),
 
     # ✅ Position Management (NEW)
+    path('daily-pnl/', DailyPnlView.as_view(), name='daily-pnl'),
+    path('daily-pnl/', DailyPnlView.as_view(), name='daily-pnl'),
     path('positions/open/', get_open_positions, name='open-positions'),
     path('positions/<uuid:position_id>/close/', close_position, name='close-position'),
     path('positions/close-all/', close_all_positions, name='close-all-positions'),

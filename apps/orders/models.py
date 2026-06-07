@@ -578,3 +578,29 @@ class Position(models.Model):
             f"[{self.mode.upper()}] {self.side} {self.quantity} "
             f"{self.symbol} @ {self.avg_entry_price} ({self.status})"
         )
+
+
+# ── Daily PnL Snapshot ────────────────────────────────────────
+class DailyPnlSnapshot(models.Model):
+    user         = models.ForeignKey(User, on_delete=models.CASCADE, related_name='daily_pnl_snapshots')
+    date         = models.DateField()
+    mode         = models.CharField(max_length=10, default='live')
+    market_type  = models.CharField(max_length=10, default='all')
+
+    realised_pnl   = models.DecimalField(max_digits=20, decimal_places=4, default=0)
+    unrealised_pnl = models.DecimalField(max_digits=20, decimal_places=4, default=0)
+    fees           = models.DecimalField(max_digits=20, decimal_places=4, default=0)
+
+    total_trades = models.IntegerField(default=0)
+    wins         = models.IntegerField(default=0)
+    losses       = models.IntegerField(default=0)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ('user', 'date', 'mode', 'market_type')
+        ordering = ['-date']
+
+    def __str__(self):
+        return f'{self.user} | {self.date} | {self.mode} | {self.market_type} | {self.realised_pnl}'
