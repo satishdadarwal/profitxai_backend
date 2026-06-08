@@ -578,8 +578,8 @@ class ICTScreener:
     CRYPTO_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"]
 
     TF_CONFIG = {
-        "timeframes": ["1D", "1H", "15m"],
-        "anchor_tf": "1D",
+        "timeframes": ["1H", "15m", "5m"],
+        "anchor_tf": "1H",
         "execution_tf": "15m",
         "bars_per_tf": 200,
     }
@@ -696,7 +696,7 @@ class ICTScreener:
             )
 
             valid = {k: v for k, v in tf_data.items() if not v.empty}
-            if len(valid) < 2:
+            if len(valid) < 1:
                 logger.warning("Screener [%s]: insufficient data", symbol)
                 return None
 
