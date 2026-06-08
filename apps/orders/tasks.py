@@ -1,3 +1,4 @@
+from celery import shared_task
 # apps/orders/tasks.py
 
 
