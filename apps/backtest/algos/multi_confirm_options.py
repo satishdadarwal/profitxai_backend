@@ -657,7 +657,7 @@ class MultiConfirmOptionsAlgo(_Base):
             reason=(
                 f"No signal | best={dominant} {dom_score:.1f} < {min_conf} | "
                 f"RSI={rsi_val:.1f} | BB_squeeze={bb_squeeze if bb_ok else 'N/A'} | "
-                f"MACD_hist={macd['histogram']:.3f if macd_ok else 0} | DTE={dte}"
+                f"MACD_hist={(macd['histogram'] if macd_ok else 0.0):.3f} | DTE={dte}"
             ),
             metadata=metadata,
             result="skipped",
