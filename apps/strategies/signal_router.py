@@ -27,11 +27,12 @@ def route_and_place_order(strategy, signal) -> Optional[object]:
         from apps.orders.models import Order
         sym = str(getattr(signal, "symbol", "") or "").upper()
         clean_sym = sym.replace("NSE:", "").replace("-INDEX", "").replace("-EQ", "").strip()
+        from django.utils import timezone
+        today = timezone.now().date()
         open_order = Order.objects.filter(
             strategy_id=strategy.id,
-            status__in=["open", "pending", "filled"],
-        ).filter(
-            asset__symbol__icontains=clean_sym
+            status__in=["open", "pending"],
+            created_at__date=today,
         ).exists()
         if open_order:
             logger.info(
