@@ -554,7 +554,19 @@ class MultiConfirmOptionsAlgo(_Base):
             "trader_type":    "buyer",
         }
 
-        if bull_score >= min_conf and bull_score > bear_score:
+        # ✅ MOMENTUM HARD GATE — buyer ke liye strong momentum zaroori
+        bull_momentum_ok = (
+            rsi_val >= 55 and                          # RSI bullish zone
+            (not macd_ok or macd_bull or macd_bull_cross) and  # MACD bullish
+            (not bb_ok or bb_bull)                     # BB bullish zone
+        )
+        bear_momentum_ok = (
+            rsi_val <= 45 and                          # RSI bearish zone
+            (not macd_ok or macd_bear or macd_bear_cross) and  # MACD bearish
+            (not bb_ok or bb_bear)                     # BB bearish zone
+        )
+
+        if bull_score >= min_conf and bull_score > bear_score and bull_momentum_ok:
             strike = _strike_price(spot, sym, "CE", self._p("otm_shift"))
             metadata["option_type"] = "CE"
             metadata["suggested_strike"] = strike
@@ -578,7 +590,7 @@ class MultiConfirmOptionsAlgo(_Base):
                 metadata=metadata,
             )
 
-        if bear_score >= min_conf and bear_score > bull_score:
+        if bear_score >= min_conf and bear_score > bull_score and bear_momentum_ok:
             strike = _strike_price(spot, sym, "PE", self._p("otm_shift"))
             metadata["option_type"] = "PE"
             metadata["suggested_strike"] = strike
@@ -612,7 +624,7 @@ class MultiConfirmOptionsAlgo(_Base):
             reason=(
                 f"No signal | best={dominant} {dom_score:.1f} < {min_conf} | "
                 f"RSI={rsi_val:.1f} | BB_squeeze={bb_squeeze if bb_ok else 'N/A'} | "
-                f"MACD_hist={macd['histogram']:.3f if macd_ok else 'N/A'} | DTE={dte}"
+                f"MACD_hist={macd['histogram']:.3f if macd_ok else 0} | DTE={dte}"
             ),
             metadata=metadata,
             result="skipped",

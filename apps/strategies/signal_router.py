@@ -964,11 +964,34 @@ def _fyers_options_order(strategy, signal, fyers, account, qty: int, risk: dict,
         qty, lot_size, actual_qty, base,
     )
 
-    # SL/target calculate karo
-    sl_pct = float(risk.get("sl_pct", 0.5))
-    target_pct = float(risk.get("target_pct", 1.0))
-    sl_price = round(current_price * (1 - sl_pct / 100), 2)
-    tgt_price = round(current_price * (1 + target_pct / 100), 2)
+    # ✅ FIX: Option premium (LTP) pe SL/TP lagao, spot pe nahi
+    # Option LTP fetch karo
+    try:
+        from apps.brokers.registry import BrokerRegistry
+        _adapter = BrokerRegistry.make("fyers", {
+            "app_id": account.app_id,
+            "access_token": account.access_token,
+        })
+        _quotes = _adapter.get_quotes([option_symbol])
+        option_ltp = float(_quotes[0].ltp) if _quotes else None
+    except Exception as _qe:
+        logger.warning("Option LTP fetch failed | %s | fallback to spot pct", _qe)
+        option_ltp = None
+
+    sl_pct = float(risk.get("sl_pct", 30.0))      # Option premium ka 30% SL (default)
+    target_pct = float(risk.get("target_pct", 60.0))  # Option premium ka 60% Target
+
+    if option_ltp and option_ltp > 0:
+        # Option premium pe SL/TP
+        sl_price = round(option_ltp * (1 - sl_pct / 100), 2)
+        tgt_price = round(option_ltp * (1 + target_pct / 100), 2)
+        logger.info("Option LTP=%.2f | SL=%.2f (%.0f%%) | TGT=%.2f (%.0f%%)",
+                    option_ltp, sl_price, sl_pct, tgt_price, target_pct)
+    else:
+        # Fallback — spot pe conservative pct
+        sl_price = round(float(current_price) * (1 - 0.005), 2)
+        tgt_price = round(float(current_price) * (1 + 0.01), 2)
+        logger.warning("Option LTP unavailable — spot fallback SL/TP")
 
     logger.info(
         "Fyers OPTIONS order | symbol=%s | type=%s | lots=%d | qty=%d | price=%s | sl=%s | tgt=%s",

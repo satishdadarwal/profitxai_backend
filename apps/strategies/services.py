@@ -993,28 +993,39 @@ def _place_live_order(strategy, signal):
 
 def _place_paper_order(strategy, signal):
     from apps.orders.services import create_order
-
     risk = strategy.risk_config if hasattr(strategy, "risk_config") else {}
-    sl_pct = float(risk.get("sl_pct", 0.5))
-    target_pct = float(risk.get("target_pct", 1.0))
+    instrument_type = getattr(strategy, "instrument_type", "equity")
     qty = int(risk.get("qty", 1))
     price = float(signal.price)
 
-    sl_price = round(
-        (price * (1 - sl_pct / 100) if signal.signal_type == "buy" else price * (1 + sl_pct / 100)), 2,
-    )
-    tgt_price = round(
-        (price * (1 + target_pct / 100) if signal.signal_type == "buy" else price * (1 - target_pct / 100)), 2,
-    )
+    # ✅ FIX: Options ke liye alag SL/TP defaults
+    if instrument_type == "options":
+        trader_type = risk.get("trader_type", "buyer")
+        sl_pct     = float(risk.get("sl_pct", 25.0))
+        target_pct = float(risk.get("target_pct", 50.0))
+        if trader_type == "buyer":
+            sl_price  = round(price * (1 - sl_pct / 100), 2)
+            tgt_price = round(price * (1 + target_pct / 100), 2)
+        else:
+            sl_price  = round(price * (1 + sl_pct / 100), 2)
+            tgt_price = round(price * (1 - target_pct / 100), 2)
+    else:
+        sl_pct     = float(risk.get("sl_pct", 0.5))
+        target_pct = float(risk.get("target_pct", 1.0))
+        if signal.signal_type == "buy":
+            sl_price  = round(price * (1 - sl_pct / 100), 2)
+            tgt_price = round(price * (1 + target_pct / 100), 2)
+        else:
+            sl_price  = round(price * (1 + sl_pct / 100), 2)
+            tgt_price = round(price * (1 - target_pct / 100), 2)
 
     return create_order(
         strategy=strategy, symbol=signal.symbol, side=signal.signal_type,
         quantity=qty, price=Decimal(str(price)), sl_price=Decimal(str(sl_price)),
         target_price=Decimal(str(tgt_price)),
-        instrument_type=getattr(strategy, "instrument_type", "equity"),
+        instrument_type=instrument_type,
         broker=None, mode="paper",
     )
-
 
 def _place_paper_order_ict(strategy, signal, sl_price=None, tp_price=None):
     from apps.orders.services import create_order
