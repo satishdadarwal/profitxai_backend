@@ -1224,8 +1224,6 @@ def _fyers_equity_order(strategy, signal, fyers, account, qty: int, risk: dict, 
         "Delta ATR SL/TP | %s | price=%.2f | ATR=%.2f | SL=%.2f | TP=%.2f | RR=1:%.1f",
         symbol, current_price, atr_val, sl_price, tgt_price, atr_tp_mult/atr_sl_mult
     )
-        tgt_price = round(current_price * (1 - target_pct / 100), 2)
-        side = "sell"
 
     # Delta product type
     product_type = "perp" if instrument_type == "perp" else "futures"
