@@ -791,3 +791,72 @@ def sync_delta_pnl(self):
             logger.warning("Delta P&L sync failed | user=%s | err=%s", account.user.email, e)
 
     return "Delta P&L synced"
+
+
+@shared_task(bind=True, name="orders.sync_fyers_tradebook")
+def sync_fyers_tradebook(self):
+    """Fyers tradebook se aaj ke trades OptionTrade mein save karo."""
+    from django.utils import timezone
+    from apps.brokers.models import BrokerAccount
+    from apps.options.models import OptionTrade
+    from decimal import Decimal
+    import logging
+    logger = logging.getLogger(__name__)
+
+    today = timezone.now().date()
+    accounts = BrokerAccount.objects.filter(
+        broker="fyers", is_active=True
+    ).select_related("user")
+
+    for account in accounts:
+        try:
+            from fyers_apiv3 import fyersModel
+            fyers = fyersModel.FyersModel(
+                client_id=account.app_id,
+                token=account.access_token,
+                is_async=False, log_path=""
+            )
+            tb = fyers.tradebook()
+            if tb.get("s") != "ok":
+                continue
+
+            trades = tb.get("tradeBook", [])
+            saved = 0
+            for t in trades:
+                order_no = t.get("orderNumber", "")
+                if not order_no:
+                    continue
+                if OptionTrade.objects.filter(metadata__fyers_order_no=order_no).exists():
+                    continue
+
+                symbol = t.get("symbol", "")
+                action = "buy" if t.get("side", 1) == 1 else "sell"
+                qty = int(t.get("tradedQty", 0))
+                price = Decimal(str(t.get("tradePrice", 0)))
+                option_type = "CE" if symbol.endswith("CE") else "PE" if symbol.endswith("PE") else ""
+
+                from apps.orders.models import Order
+                from apps.market.models import Asset
+                # Symbol se underlying extract
+                u = next((n for n in ["BANKNIFTY","MIDCPNIFTY","FINNIFTY","SENSEX","NIFTY"] if n in symbol), "NIFTY")
+                asset = Asset.objects.filter(symbol=u).first()
+                Order.objects.create(
+                    user=account.user,
+                    asset=asset,
+                    side=action,
+                    quantity=qty,
+                    avg_fill_price=price,
+                    status="closed" if action == "sell" else "open",
+                    mode="live",
+                    order_type="market",
+                    execution_status="filled",
+                    notes=symbol,
+                    exchange_order_id=order_no,
+                )
+                saved += 1
+
+            logger.info("Fyers tradebook synced | user=%s | saved=%d", account.user.email, saved)
+        except Exception as e:
+            logger.warning("Fyers tradebook sync failed | user=%s | err=%s", account.user.email, e)
+
+    return "Tradebook synced"
