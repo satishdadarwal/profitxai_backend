@@ -787,7 +787,7 @@ class DailyPnlView(APIView):
                 'mode': snap.mode,
                 'realised': float(getattr(snap, 'realized_pnl', 0) or getattr(snap, 'realised_pnl', 0) or 0),
                 'unrealised': float(getattr(snap, 'unrealized_pnl', 0) or getattr(snap, 'unrealised_pnl', 0) or 0),
-                'total': float(getattr(snap, 'total_pnl', 0) or 0),
+                'total': float(getattr(snap, 'realised_pnl', 0) or 0) + float(getattr(snap, 'unrealised_pnl', 0) or 0),
                 'total_trades': getattr(snap, 'trade_count', 0) or getattr(snap, 'total_trades', 0) or 0,
                 'wins': getattr(snap, 'win_count', 0) or getattr(snap, 'wins', 0) or 0,
                 'source': 'snapshot',
