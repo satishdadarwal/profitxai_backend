@@ -809,15 +809,15 @@ class TradeJournalListView(APIView):
     def get(self, request):
         from django.core.paginator import Paginator
         market_type = request.query_params.get("market_type", "all")
-        mode_filter = request.query_params.get("mode", "all")
+        mode_filter = request.query_params.get("mode", "live")
         tags_filter = request.query_params.get("tags", "")
         page_num    = int(request.query_params.get("page", 1))
         results = []
 
         # 1. Order model — live Fyers/Delta trades
         order_qs = Order.objects.filter(
-            user=request.user, execution_status="filled",
-        ).select_related("asset").order_by("-created_at")
+            user=request.user, mode="live",
+        ).exclude(side=None).exclude(exchange_order_id="").exclude(exchange_order_id=None).exclude(notes__startswith="strategy=").select_related("asset").order_by("-created_at")
         if mode_filter != "all":
             order_qs = order_qs.filter(mode=mode_filter)
         if market_type == "indian":
