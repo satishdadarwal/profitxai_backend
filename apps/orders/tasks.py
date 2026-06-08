@@ -718,10 +718,10 @@ def sync_fyers_pnl(self):
                 date=today,
                 mode="live",
                 defaults={
-                    "realized_pnl": realized,
-                    "unrealized_pnl": unrealized,
+                    "realised_pnl": realized,
+                    "unrealised_pnl": unrealized,
                     "total_pnl": total,
-                    "trade_count": overall.get("count_total", 0),
+                    "total_trades": overall.get("count_total", 0),
                     "win_count": sum(
                         1 for p in positions.get("netPositions", [])
                         if p.get("realized_profit", 0) > 0
@@ -779,10 +779,10 @@ def sync_delta_pnl(self):
                 mode="live",
                 defaults={
                     "realized_pnl":   realized,
-                    "unrealized_pnl": unrealized,
+                    "unrealised_pnl": unrealized,
                     "total_pnl":      realized + unrealized,
                     "trade_count":    len(positions),
-                    "win_count":      sum(1 for p in positions if float(p.get("realized_pnl", 0)) > 0),
+                    "wins":           sum(1 for p in positions if float(p.get("realized_pnl", 0)) > 0),
                 }
             )
             logger.info("Delta P&L synced | user=%s | realized=%.2f", account.user.email, realized)
