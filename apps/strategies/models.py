@@ -270,6 +270,19 @@ class StrategyPerformanceSnapshot(models.Model):
         ordering = ["-period_start"]
 
 
+from django.db.models.signals import pre_save
+
+@receiver(pre_save, sender=Strategy)
+def apply_strategy_template(sender, instance, **kwargs):
+    """Strategy save hone se pehle template se missing fields fill karo."""
+    try:
+        from apps.strategies.templates.strategy_config import apply_template
+        apply_template(instance)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("Template apply failed: %s", e)
+
+
 @receiver(post_save, sender=Strategy)
 def broadcast_strategy_update(sender, instance, **kwargs):
     """Strategy save hone pe user ke WS channel pe push karo."""
