@@ -1081,7 +1081,8 @@ def _fyers_options_order(strategy, signal, fyers, account, qty: int, risk: dict,
             instrument_type="options",
             broker=account,
             exchange_order_id=exchange_order_id,
-            mode="live",  # FIX: broker fn = always live
+            mode="live",
+            user=effective_user or strategy.user,
         )
         logger.info(
             "Fyers options order placed | lots=%d | qty=%d | order_id=%s | exchange_id=%s",

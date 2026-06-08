@@ -155,6 +155,7 @@ def create_order(
     broker_response: dict = None,
     mode: str = "paper",
     client_order_id: Optional[str] = None,
+    user=None,  # override strategy.user — subscriber ke liye
 ) -> Order:
     """
     Strategy-friendly wrapper around place_order().
@@ -180,7 +181,7 @@ def create_order(
             return existing
 
     order = place_order(
-        user=strategy.user,
+        user=user or strategy.user,
         asset_symbol=symbol,
         side=side,
         order_type=Order.OrderType.MARKET,
