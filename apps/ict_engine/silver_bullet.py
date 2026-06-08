@@ -966,7 +966,7 @@ def execute_silver_bullet_cycle(strategy, symbol: str) -> dict:
             today = timezone.now().date()
             already_open = _Order.objects.filter(
                 strategy_id=strategy.id,
-                status__in=["open", "pending"],
+                status__in=["open", "pending", "filled"],
                 created_at__date=today,
             ).exists()
 

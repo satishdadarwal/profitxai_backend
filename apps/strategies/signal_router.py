@@ -31,7 +31,7 @@ def route_and_place_order(strategy, signal) -> Optional[object]:
         today = timezone.now().date()
         open_order = Order.objects.filter(
             strategy_id=strategy.id,
-            status__in=["open", "pending"],
+            status__in=["open", "pending", "filled"],
             created_at__date=today,
         ).exists()
         if open_order:
@@ -371,7 +371,7 @@ def _route_global_strategy(strategy, signal):
             if Order.objects.filter(
                 strategy_id=strategy.id,
                 user_id=user_id,
-                status__in=["open", "pending"],
+                status__in=["open", "pending", "filled"],
                 created_at__date=today,
             ).exists():
                 logger.info("Duplicate blocked | user=%s | strategy=%s", user_id, strategy.id)

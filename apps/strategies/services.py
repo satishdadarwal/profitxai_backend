@@ -999,7 +999,7 @@ def _place_paper_order(strategy, signal):
         today = timezone.now().date()
         if Order.objects.filter(
             strategy_id=strategy.id,
-            status__in=["open", "pending"],
+            status__in=["open", "pending", "filled"],
             created_at__date=today,
         ).exists():
             logger.info("Duplicate blocked | strategy=%s", strategy.id)
@@ -1062,7 +1062,7 @@ def _place_paper_order_ict(strategy, signal, sl_price=None, tp_price=None):
         today = timezone.now().date()
         if Order.objects.filter(
             strategy_id=strategy.id,
-            status__in=["open", "pending"],
+            status__in=["open", "pending", "filled"],
             created_at__date=today,
         ).exists():
             logger.info("Duplicate blocked | strategy=%s | symbol=%s", strategy.id, signal.symbol)
