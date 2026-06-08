@@ -980,6 +980,28 @@ def execute_silver_bullet_cycle(strategy, symbol: str) -> dict:
     except Exception as e:
         logger.warning("Duplicate check failed | %s", e)
 
+    # ── Confluence Options check ─────────────────────────────────
+    try:
+        if getattr(strategy, "algo_name", "") == "confluence_options":
+            from apps.backtest.algos.confluence_options import ConfluenceOptionsAlgo
+            df5_list = [
+                {"high": float(r.high), "low": float(r.low), "close": float(r.close)}
+                for _, r in df_5m.iterrows()
+            ] if not df_5m.empty else []
+            sb_dict = {"direction": sig.direction.value, "confluence_score": sig.confluence_score, "score": sig.confluence_score}
+            algo = ConfluenceOptionsAlgo(parameters=getattr(strategy, "parameters", {}), risk_config=getattr(strategy, "risk_config", {}))
+            conf_signal = algo.generate_signal(symbol=symbol, candles_5m=df5_list, candles_15m=[], candles_1h=[], sb_signal=sb_dict)
+            if conf_signal:
+                logger.info("✅ Confluence signal | %s | %s | combined=%.1f", symbol, conf_signal["option_type"], conf_signal["confidence"])
+                sig_meta = sig.to_dict()
+                sig_meta.update(conf_signal)
+                return {"signal_type": conf_signal["signal_type"], "symbol": symbol, "price": Decimal(str(conf_signal["price"])), "reason": f'Confluence {conf_signal["option_type"]} | SB={conf_signal["sb_score"]} MC={conf_signal["mc_score"]}', "metadata": sig_meta, "result": "executed", "order": None}
+            else:
+                logger.info("Confluence: SB ok but MC failed | %s", symbol)
+                return _null_sb_signal(symbol)
+    except Exception as _ce:
+        logger.warning("Confluence check error | %s", _ce)
+
     # Order placement is handled by services.py _handle_ict_signal
     # Do NOT place order here — it causes duplicates
 

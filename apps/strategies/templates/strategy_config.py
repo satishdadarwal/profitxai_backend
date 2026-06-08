@@ -58,6 +58,27 @@ STRATEGY_TEMPLATES = {
 }
 
 
+STRATEGY_TEMPLATES["confluence_options"] = {
+    "instrument_type": "options",
+    "risk_config": {
+        "trader_type": "buyer",
+        "qty": 1,
+        "atr_sl_mult": 1.0,
+        "atr_tp_mult": 3.0,
+    },
+    "parameters": {
+        "capital": 100000,
+        "min_confidence": 65,
+        "min_sb_score": 65,
+        "min_mc_score": 60,
+        "rsi_bull_min": 52,
+        "rsi_bear_max": 48,
+    },
+    "allowed_plans": ["elite"],
+    "is_global": True,
+}
+
+
 def apply_template(strategy):
     """Strategy save hone pe template se missing fields fill karo."""
     template = STRATEGY_TEMPLATES.get(strategy.algo_name)
