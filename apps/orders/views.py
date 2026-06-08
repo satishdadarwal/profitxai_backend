@@ -748,20 +748,101 @@ from rest_framework import generics
 from .models import Trade
 from .serializers import TradeSerializer
 
-class TradeJournalListView(generics.ListAPIView):
+class TradeJournalListView(APIView):
     """
-    GET /api/v1/orders/journal/?page=1&market_type=indian
-    Returns paginated list of trades for journal view
+    GET /api/v1/orders/journal/?page=1&market_type=indian&mode=live&tags=fvg
+    Order model (live) + Trade model (paper) merge karke return karo
     """
-    serializer_class = TradeSerializer
     permission_classes = [IsAuthenticated]
 
-    def get_queryset(self):
-        queryset = Trade.objects.filter(user=self.request.user).order_by("-created_at")
-        market_type = self.request.query_params.get("market_type")
-        if market_type:
-            queryset = queryset.filter(market_type=market_type)
-        return queryset
+    def get(self, request):
+        from django.core.paginator import Paginator
+        market_type = request.query_params.get("market_type", "all")
+        mode_filter = request.query_params.get("mode", "all")
+        tags_filter = request.query_params.get("tags", "")
+        page_num    = int(request.query_params.get("page", 1))
+        results = []
+
+        # 1. Order model — live Fyers/Delta trades
+        order_qs = Order.objects.filter(
+            user=request.user, execution_status="filled",
+        ).select_related("asset").order_by("-created_at")
+        if mode_filter != "all":
+            order_qs = order_qs.filter(mode=mode_filter)
+        if market_type == "indian":
+            order_qs = order_qs.exclude(notes__icontains="USD")
+        elif market_type == "crypto":
+            order_qs = order_qs.filter(
+                Q(notes__icontains="BTC") | Q(notes__icontains="ETH") |
+                Q(notes__icontains="SOL") | Q(notes__icontains="USD")
+            )
+        for o in order_qs:
+            sym = o.notes or (o.asset.symbol if o.asset else "")
+            is_crypto = any(k in sym.upper() for k in ["USDT","BTC","ETH","SOL","PERP"])
+            mtype = "crypto" if is_crypto else "indian"
+            side = o.side or "buy"
+            if side == "long": side = "buy"
+            elif side == "short": side = "sell"
+            price = float(o.avg_fill_price or o.limit_price or 0)
+            opt_type = "CE" if "CE" in sym else "PE" if "PE" in sym else ""
+            results.append({
+                "id": str(o.id), "order_id": str(o.id),
+                "symbol": sym, "asset_name": o.asset.symbol if o.asset else sym,
+                "market_type": mtype,
+                "market_display": "Crypto Market" if is_crypto else "Indian Market",
+                "side": side, "mode": o.mode or "live",
+                "quantity": float(o.quantity or 0), "price": price,
+                "amount": float(o.quantity or 0) * price, "fee": 0.0,
+                "realized_pnl": None, "net_pnl": None,
+                "notes": "", "tags": [], "emoji_reaction": "",
+                "strike": None, "lots": None, "option_type": opt_type,
+                "leverage": None, "funding_fee": None,
+                "created_at": o.created_at.isoformat(),
+            })
+
+        # 2. Trade model — paper trades
+        trade_qs = Trade.objects.filter(user=request.user).order_by("-created_at")
+        if mode_filter != "all":
+            trade_qs = trade_qs.filter(mode=mode_filter)
+        if market_type != "all":
+            trade_qs = trade_qs.filter(market_type=market_type)
+        if tags_filter:
+            for tag in [t.strip() for t in tags_filter.split(",") if t.strip()]:
+                trade_qs = trade_qs.filter(tags__icontains=tag)
+        for t in trade_qs:
+            side = t.side or "buy"
+            if side == "long": side = "buy"
+            elif side == "short": side = "sell"
+            pnl = float(t.realized_pnl) if t.realized_pnl is not None else None
+            fee = float(t.fee or 0)
+            results.append({
+                "id": str(t.id), "order_id": str(t.order_id) if t.order_id else None,
+                "symbol": t.asset.symbol if t.asset else "", "asset_name": t.asset.symbol if t.asset else "",
+                "market_type": t.market_type or "indian",
+                "market_display": "Indian Market" if t.market_type == "indian" else "Crypto Market",
+                "side": side, "mode": t.mode or "paper",
+                "quantity": float(t.quantity or 0), "price": float(t.price or 0),
+                "amount": float(t.amount or 0), "fee": fee,
+                "realized_pnl": pnl, "net_pnl": (pnl - fee) if pnl is not None else None,
+                "notes": t.notes or "", "tags": t.tags or [],
+                "emoji_reaction": t.emoji_reaction or "",
+                "strike": float(t.strike) if t.strike else None,
+                "lots": t.lots, "option_type": t.option_type or "",
+                "leverage": float(t.leverage) if t.leverage else None,
+                "funding_fee": float(t.funding_fee) if t.funding_fee else None,
+                "created_at": t.created_at.isoformat(),
+            })
+
+        results.sort(key=lambda x: x["created_at"], reverse=True)
+        paginator = Paginator(results, 20)
+        page = paginator.get_page(page_num)
+        return Response({
+            "count": paginator.count,
+            "next": f"?page={page_num+1}" if page.has_next() else None,
+            "previous": f"?page={page_num-1}" if page.has_previous() else None,
+            "results": list(page.object_list),
+        })
+
 
 
 class DailyPnlView(APIView):
