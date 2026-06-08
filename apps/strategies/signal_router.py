@@ -363,6 +363,21 @@ def _route_global_strategy(strategy, signal):
     # ── Step 4: Har user ke liye order place karo ─────────────────
     for user_id, account in user_best_account.items():
         subscriber = account.user
+        # ✅ DUPLICATE CHECK per user
+        try:
+            from apps.orders.models import Order
+            from django.utils import timezone
+            today = timezone.now().date()
+            if Order.objects.filter(
+                strategy_id=strategy.id,
+                user_id=user_id,
+                status__in=["open", "pending"],
+                created_at__date=today,
+            ).exists():
+                logger.info("Duplicate blocked | user=%s | strategy=%s", user_id, strategy.id)
+                continue
+        except Exception as _dup_e:
+            logger.warning("Duplicate check error: %s", _dup_e)
         try:
             order = _place_order_for_subscriber(
                 strategy=strategy,
