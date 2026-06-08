@@ -692,14 +692,9 @@ def sync_fyers_pnl(self):
     import logging
     logger = logging.getLogger(__name__)
 
-    # Market hours check (9:15 - 15:35 IST)
-    now_ist = timezone.now().astimezone(timezone.get_fixed_timezone(330))
-    if not (9 * 60 + 15 <= now_ist.hour * 60 + now_ist.minute <= 15 * 60 + 35):
-        return "Market closed"
-
     today = timezone.now().date()
     accounts = BrokerAccount.objects.filter(
-        broker="fyers", is_active=True, is_verified=True
+        broker="fyers", is_active=True
     ).select_related("user")
 
     for account in accounts:
