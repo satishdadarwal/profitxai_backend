@@ -14,6 +14,12 @@ class WebsocketConfig(AppConfig):
         if IS_CELERY:
             logger.info("⏭️  Celery worker — skipping feed auto-start")
             return
+        # ✅ FIX: migrate/shell commands pe feeds start mat karo
+        import sys
+        _cmd = " ".join(sys.argv)
+        if any(x in _cmd for x in ["migrate", "collectstatic", "makemigrations", "shell", "test"]):
+            logger.info("⏭️  Management command — skipping feed auto-start")
+            return
 
         import threading
         import time
