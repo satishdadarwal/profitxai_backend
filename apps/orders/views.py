@@ -245,23 +245,44 @@ class CalendarPerformanceView(APIView):
         else:
             end_date = datetime(year, month + 1, 1)
         
+        from django.utils import timezone
+        # timezone-aware dates
+        import pytz
+        tz = pytz.UTC
+        start_dt = tz.localize(start_date)
+        end_dt = tz.localize(end_date)
+
         # Query unified trades
         trades_query = Trade.objects.filter(
             user=user,
-            created_at__gte=start_date,
-            created_at__lt=end_date,
+            created_at__gte=start_dt,
+            created_at__lt=end_dt,
         )
-        
         if market_type != 'all':
             trades_query = trades_query.filter(market_type=market_type)
-        
+
         # Query option trades (Indian market)
         option_trades_query = OptionTrade.objects.filter(
             user=user,
-            entry_time__gte=start_date,
-            entry_time__lt=end_date,
-            status='closed',  # Only closed trades have PnL
+            entry_time__gte=start_dt,
+            entry_time__lt=end_dt,
+            status='closed',
         )
+
+        # Query live Order model — sell orders with net_pnl
+        order_query = Order.objects.filter(
+            user=user,
+            mode='live',
+            side='sell',
+            execution_status='filled',
+            created_at__gte=start_dt,
+            created_at__lt=end_dt,
+        ).exclude(exchange_order_id='').exclude(exchange_order_id__isnull=True).exclude(notes__startswith='strategy=')
+
+        if market_type == 'indian':
+            order_query = order_query.exclude(broker='delta')
+        elif market_type == 'crypto':
+            order_query = order_query.filter(broker='delta')
         
         # Aggregate trades by day
         daily_data = defaultdict(lambda: {
@@ -310,6 +331,35 @@ class CalendarPerformanceView(APIView):
                     else:
                         daily_data[date_key]['breakeven'] += 1
         
+        # Process live Order sell trades — buy/sell match for P&L
+        from collections import defaultdict as _dd
+        buy_orders = Order.objects.filter(
+            user=user, mode='live', side='buy', execution_status='filled',
+            created_at__gte=start_dt, created_at__lt=end_dt,
+        ).exclude(exchange_order_id='').exclude(exchange_order_id__isnull=True).exclude(notes__startswith='strategy=')
+
+        buy_map = _dd(list)
+        for b in buy_orders:
+            sym = b.symbol_display or b.notes or ''
+            buy_map[sym].append(float(b.avg_fill_price or 0))
+
+        for order in order_query:
+            sym = order.symbol_display or order.notes or ''
+            sell_price = float(order.avg_fill_price or 0)
+            qty = float(order.quantity or 0)
+            buy_prices = buy_map.get(sym, [])
+            buy_price = buy_prices.pop(0) if buy_prices else 0
+            if buy_price > 0 and sell_price > 0:
+                pnl = round((sell_price - buy_price) * qty, 2)
+                date_key = order.created_at.astimezone(pytz.UTC).date().isoformat()
+                daily_data[date_key]['date'] = date_key
+                daily_data[date_key]['pnl'] += pnl
+                daily_data[date_key]['trades'] += 1
+                if pnl > 0:
+                    daily_data[date_key]['wins'] += 1
+                elif pnl < 0:
+                    daily_data[date_key]['losses'] += 1
+
         # Calculate win_rate and avg_pnl for each day
         for date_key, data in daily_data.items():
             total = data['trades']
