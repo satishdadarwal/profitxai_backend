@@ -679,3 +679,119 @@ def save_daily_pnl_snapshot(self, mode="live", market_type="all"):
             import logging
             logging.getLogger(__name__).error("DailyPnlSnapshot error: " + str(e))
     return "Snapshot done"
+
+
+@shared_task(bind=True, name="orders.sync_fyers_pnl")
+def sync_fyers_pnl(self):
+    """Fyers se real-time P&L sync karo — har 5 min mein market hours mein."""
+    from django.contrib.auth import get_user_model
+    from django.utils import timezone
+    from apps.brokers.models import BrokerAccount
+    from apps.orders.models import DailyPnlSnapshot
+    from decimal import Decimal
+    import logging
+    logger = logging.getLogger(__name__)
+
+    # Market hours check (9:15 - 15:35 IST)
+    now_ist = timezone.now().astimezone(timezone.get_fixed_timezone(330))
+    if not (9 * 60 + 15 <= now_ist.hour * 60 + now_ist.minute <= 15 * 60 + 35):
+        return "Market closed"
+
+    today = timezone.now().date()
+    accounts = BrokerAccount.objects.filter(
+        broker="fyers", is_active=True, is_verified=True
+    ).select_related("user")
+
+    for account in accounts:
+        try:
+            from fyers_apiv3 import fyersModel
+            fyers = fyersModel.FyersModel(
+                client_id=account.app_id,
+                token=account.access_token,
+                is_async=False, log_path=""
+            )
+            positions = fyers.positions()
+            if positions.get("s") != "ok":
+                continue
+            overall = positions.get("overall", {})
+            realized = Decimal(str(overall.get("pl_realized", 0)))
+            unrealized = Decimal(str(overall.get("pl_unrealized", 0)))
+            total = realized + unrealized
+
+            DailyPnlSnapshot.objects.update_or_create(
+                user=account.user,
+                date=today,
+                mode="live",
+                defaults={
+                    "realized_pnl": realized,
+                    "unrealized_pnl": unrealized,
+                    "total_pnl": total,
+                    "trade_count": overall.get("count_total", 0),
+                    "win_count": sum(
+                        1 for p in positions.get("netPositions", [])
+                        if p.get("realized_profit", 0) > 0
+                    ),
+                }
+            )
+            logger.info("Fyers P&L synced | user=%s | realized=%.2f | unrealized=%.2f",
+                       account.user.email, realized, unrealized)
+        except Exception as e:
+            logger.warning("Fyers P&L sync failed | user=%s | err=%s", account.user.email, e)
+
+    return "P&L synced"
+
+
+@shared_task(bind=True, name="orders.sync_delta_pnl")
+def sync_delta_pnl(self):
+    """Delta Exchange se real-time P&L sync karo — 24x7."""
+    from django.contrib.auth import get_user_model
+    from django.utils import timezone
+    from apps.brokers.models import BrokerAccount
+    from apps.orders.models import DailyPnlSnapshot
+    from decimal import Decimal
+    import logging
+    logger = logging.getLogger(__name__)
+
+    today = timezone.now().date()
+    accounts = BrokerAccount.objects.filter(
+        broker="delta", is_active=True, is_verified=True
+    ).select_related("user")
+
+    for account in accounts:
+        try:
+            from apps.websocket.delta_feed import _delta_get_wallet
+            wallet = _delta_get_wallet(account)
+            if not wallet:
+                continue
+
+            # Delta positions fetch
+            from apps.strategies.signal_router import _delta_sign_and_post
+            positions_resp = _delta_sign_and_post(
+                account.api_key, account.api_secret,
+                "/v2/positions/margined", {}, method="GET"
+            )
+            positions = positions_resp.get("result", [])
+            realized = Decimal("0")
+            unrealized = Decimal("0")
+
+            for pos in positions:
+                realized   += Decimal(str(pos.get("realized_pnl", 0)))
+                unrealized += Decimal(str(pos.get("unrealized_pnl", 0)))
+
+            DailyPnlSnapshot.objects.update_or_create(
+                user=account.user,
+                date=today,
+                mode="live",
+                defaults={
+                    "realized_pnl":   realized,
+                    "unrealized_pnl": unrealized,
+                    "total_pnl":      realized + unrealized,
+                    "trade_count":    len(positions),
+                    "win_count":      sum(1 for p in positions if float(p.get("realized_pnl", 0)) > 0),
+                }
+            )
+            logger.info("Delta P&L synced | user=%s | realized=%.2f", account.user.email, realized)
+        except Exception as e:
+            logger.warning("Delta P&L sync failed | user=%s | err=%s", account.user.email, e)
+
+    return "Delta P&L synced"
