@@ -670,6 +670,11 @@ def _execute_cycle_inner(strategy, target_symbol: str) -> "AlgoSignal":
         result = execute_silver_bullet_cycle(strategy, target_symbol)
         signal = _wrap_ict_result(result, target_symbol)
         return _handle_ict_signal(strategy, signal, target_symbol, strat_key)
+    if strategy.algo_name == "confluence_options":
+        from apps.ict_engine.silver_bullet import execute_silver_bullet_cycle
+        result = execute_silver_bullet_cycle(strategy, target_symbol)
+        signal = _wrap_ict_result(result, target_symbol)
+        return _handle_ict_signal(strategy, signal, target_symbol, strat_key)
 
     if strategy.algo_name == "ema_scalp":
         from apps.ict_engine.ema_scalp import execute_ema_scalp_cycle
