@@ -123,6 +123,15 @@ class Order(models.Model):
     # Execution
     exchange_order_id = models.CharField(max_length=128, blank=True, default="")
     notes = models.TextField(blank=True, default="")
+    # ── Journal fields ────────────────────────────────────────────
+    symbol_display = models.CharField(max_length=64, blank=True, default="")
+    broker = models.CharField(max_length=20, blank=True, default="")
+    instrument_type = models.CharField(max_length=20, blank=True, default="")
+    option_type = models.CharField(max_length=4, blank=True, default="")
+    lots = models.IntegerField(null=True, blank=True)
+    tags = models.JSONField(default=list, blank=True)
+    emoji_reaction = models.CharField(max_length=10, blank=True, default="")
+    journal_notes = models.TextField(blank=True, default="")
 
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
