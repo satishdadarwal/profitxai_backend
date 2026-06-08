@@ -834,7 +834,7 @@ class TradeJournalListView(APIView):
             side = o.side or "buy"
             if side == "long": side = "buy"
             elif side == "short": side = "sell"
-            price = float(o.avg_fill_price or o.limit_price or 0)
+            price = float(o.avg_fill_price) if o.avg_fill_price and float(o.avg_fill_price) > 0 else float(o.limit_price or 0)
             opt_type = "CE" if "CE" in sym else "PE" if "PE" in sym else ""
             LOT_SIZES = {"NIFTY":65,"BANKNIFTY":30,"FINNIFTY":40,"MIDCPNIFTY":120,"SENSEX":10}
             underlying = next((k for k in LOT_SIZES if k in sym.upper()), None)
@@ -892,6 +892,21 @@ class TradeJournalListView(APIView):
                 "funding_fee": float(t.funding_fee) if t.funding_fee else None,
                 "created_at": t.created_at.isoformat(),
             })
+
+        # Buy+Sell match karke net_pnl calculate karo
+        from collections import defaultdict
+        buys = defaultdict(list)
+        for r in results:
+            if r.get("side") == "buy":
+                buys[r["symbol"]].append(r)
+        for r in results:
+            if r.get("side") == "sell":
+                sym = r["symbol"]
+                if buys.get(sym):
+                    buy = buys[sym].pop(0)
+                    pnl = round((r["price"] - buy["price"]) * r["quantity"], 2)
+                    r["realized_pnl"] = pnl
+                    r["net_pnl"] = pnl
 
         results.sort(key=lambda x: x["created_at"], reverse=True)
         paginator = Paginator(results, 20)

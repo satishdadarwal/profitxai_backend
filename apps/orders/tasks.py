@@ -840,6 +840,14 @@ def sync_fyers_tradebook(self):
                 # Symbol se underlying extract
                 u = next((n for n in ["BANKNIFTY","MIDCPNIFTY","FINNIFTY","SENSEX","NIFTY"] if n in symbol), "NIFTY")
                 asset = Asset.objects.filter(symbol=u).first()
+                # Agar already exists — avg_fill_price update karo
+                existing = Order.objects.filter(exchange_order_id=order_no).first()
+                if existing:
+                    if float(existing.avg_fill_price or 0) == 0:
+                        existing.avg_fill_price = price
+                        existing.execution_status = "filled"
+                        existing.save(update_fields=["avg_fill_price", "execution_status", "updated_at"])
+                    continue
                 Order.objects.create(
                     user=account.user,
                     asset=asset,
