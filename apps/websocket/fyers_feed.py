@@ -663,12 +663,16 @@ class FyersFeedManager:
                 loop.run_until_complete(
                     layer.group_send(group, {"type": msg_type, "data": data})
                 )
-        except RuntimeError as e:
-            if "interpreter shutdown" in str(e) or "cannot schedule" in str(e):
-                pass  # Normal during shutdown — ignore silently
-            else:
-                logger.error("FyersFeed broadcast error [%s]: %s", group, e)
-        except Exception as e:
+        except (RuntimeError, Exception) as e:
+            err_str = str(e)
+            # Shutdown-related errors — silently ignore
+            if any(x in err_str for x in [
+                "interpreter shutdown",
+                "cannot schedule",
+                "Event loop is closed",
+                "no running event loop",
+            ]):
+                return  # Silent — normal during restart
             logger.error("FyersFeed broadcast error [%s]: %s", group, e)
 
     # ── Redis publish ─────────────────────────────────────────

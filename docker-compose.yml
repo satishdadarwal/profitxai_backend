@@ -45,7 +45,7 @@ services:
   # ✅ NAYA: Cloudflare Tunnel
   cloudflared:
     image: cloudflare/cloudflared:latest
-    restart: unless-stopped
+    restart: always
     command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
     depends_on:
       - web
