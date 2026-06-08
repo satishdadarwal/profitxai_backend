@@ -778,20 +778,18 @@ class DailyPnlView(APIView):
 
         # Snapshot se serve karo agar available
         snap = DailyPnlSnapshot.objects.filter(
-            user=request.user, date=target_date, mode=mode, market_type=market_type
+            user=request.user, date=target_date, mode=mode
         ).first()
 
         if snap:
             return Response({
                 'date': str(snap.date),
                 'mode': snap.mode,
-                'market_type': snap.market_type,
-                'realised': float(snap.realised_pnl),
-                'unrealised': float(snap.unrealised_pnl),
-                'fees': float(snap.fees),
-                'total_trades': snap.total_trades,
-                'wins': snap.wins,
-                'losses': snap.losses,
+                'realised': float(getattr(snap, 'realized_pnl', 0) or getattr(snap, 'realised_pnl', 0) or 0),
+                'unrealised': float(getattr(snap, 'unrealized_pnl', 0) or getattr(snap, 'unrealised_pnl', 0) or 0),
+                'total': float(getattr(snap, 'total_pnl', 0) or 0),
+                'total_trades': getattr(snap, 'trade_count', 0) or getattr(snap, 'total_trades', 0) or 0,
+                'wins': getattr(snap, 'win_count', 0) or getattr(snap, 'wins', 0) or 0,
                 'source': 'snapshot',
             })
 
