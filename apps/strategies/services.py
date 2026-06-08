@@ -998,17 +998,30 @@ def _place_paper_order(strategy, signal):
     qty = int(risk.get("qty", 1))
     price = float(signal.price)
 
-    # ✅ FIX: Options ke liye alag SL/TP defaults
+    # ✅ ATR-based SL/TP for options, fixed % for equity/futures
     if instrument_type == "options":
-        trader_type = risk.get("trader_type", "buyer")
-        sl_pct     = float(risk.get("sl_pct", 25.0))
-        target_pct = float(risk.get("target_pct", 50.0))
-        if trader_type == "buyer":
-            sl_price  = round(price * (1 - sl_pct / 100), 2)
-            tgt_price = round(price * (1 + target_pct / 100), 2)
-        else:
-            sl_price  = round(price * (1 + sl_pct / 100), 2)
-            tgt_price = round(price * (1 - target_pct / 100), 2)
+        meta = getattr(signal, 'metadata', {}) or {}
+        atr_val    = float(meta.get("atr", 0))
+        spot_price = float(meta.get("spot", price))
+        option_type = meta.get("option_type", "CE")
+
+        if atr_val <= 0:
+            atr_val = spot_price * 0.006  # fallback
+
+        atr_sl_mult = float(risk.get("atr_sl_mult", 1.0))
+        atr_tp_mult = float(risk.get("atr_tp_mult", 3.0))
+
+        if option_type == "PE":  # bearish
+            sl_price  = round(spot_price + (atr_sl_mult * atr_val), 2)
+            tgt_price = round(spot_price - (atr_tp_mult * atr_val), 2)
+        else:  # CE bullish
+            sl_price  = round(spot_price - (atr_sl_mult * atr_val), 2)
+            tgt_price = round(spot_price + (atr_tp_mult * atr_val), 2)
+
+        logger.info(
+            "Paper ATR SL/TP | spot=%.2f | ATR=%.2f | %s | SL=%.2f | TP=%.2f",
+            spot_price, atr_val, option_type, sl_price, tgt_price
+        )
     else:
         sl_pct     = float(risk.get("sl_pct", 0.5))
         target_pct = float(risk.get("target_pct", 1.0))

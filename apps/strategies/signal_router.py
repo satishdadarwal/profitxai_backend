@@ -964,8 +964,26 @@ def _fyers_options_order(strategy, signal, fyers, account, qty: int, risk: dict,
         qty, lot_size, actual_qty, base,
     )
 
-    # ✅ FIX: Option premium (LTP) pe SL/TP lagao, spot pe nahi
-    # Option LTP fetch karo
+    # ✅ ATR-based SL/TP — spot movement pe, premium automatically follow karega
+    meta = getattr(signal, 'metadata', {}) or {}
+    atr_val = float(meta.get("atr", 0))
+    spot_price = float(meta.get("spot", float(current_price)))
+
+    # ATR fallback — agar meta mein nahi hai
+    if atr_val <= 0:
+        atr_val = spot_price * 0.006  # ~0.6% of spot as ATR estimate
+
+    atr_sl_mult  = float(risk.get("atr_sl_mult", 1.0))   # 1x ATR SL
+    atr_tp1_mult = float(risk.get("atr_tp_mult", 3.0))   # 3x ATR TP (1:3 RR)
+
+    if option_type == "PE":  # Bearish — spot neeche jaana chahiye
+        sl_spot  = round(spot_price + (atr_sl_mult * atr_val), 2)   # SL upar
+        tgt_spot = round(spot_price - (atr_tp1_mult * atr_val), 2)  # TP neeche
+    else:  # CE — Bullish — spot upar jaana chahiye
+        sl_spot  = round(spot_price - (atr_sl_mult * atr_val), 2)   # SL neeche
+        tgt_spot = round(spot_price + (atr_tp1_mult * atr_val), 2)  # TP upar
+
+    # Option premium LTP fetch karo (for entry price only)
     try:
         from apps.brokers.registry import BrokerRegistry
         _adapter = BrokerRegistry.make("fyers", {
@@ -975,23 +993,17 @@ def _fyers_options_order(strategy, signal, fyers, account, qty: int, risk: dict,
         _quotes = _adapter.get_quotes([option_symbol])
         option_ltp = float(_quotes[0].ltp) if _quotes else None
     except Exception as _qe:
-        logger.warning("Option LTP fetch failed | %s | fallback to spot pct", _qe)
+        logger.warning("Option LTP fetch failed | %s", _qe)
         option_ltp = None
 
-    sl_pct = float(risk.get("sl_pct", 30.0))      # Option premium ka 30% SL (default)
-    target_pct = float(risk.get("target_pct", 60.0))  # Option premium ka 60% Target
+    # SL/TP = spot levels (GTT will use these)
+    sl_price  = sl_spot
+    tgt_price = tgt_spot
 
-    if option_ltp and option_ltp > 0:
-        # Option premium pe SL/TP
-        sl_price = round(option_ltp * (1 - sl_pct / 100), 2)
-        tgt_price = round(option_ltp * (1 + target_pct / 100), 2)
-        logger.info("Option LTP=%.2f | SL=%.2f (%.0f%%) | TGT=%.2f (%.0f%%)",
-                    option_ltp, sl_price, sl_pct, tgt_price, target_pct)
-    else:
-        # Fallback — spot pe conservative pct
-        sl_price = round(float(current_price) * (1 - 0.005), 2)
-        tgt_price = round(float(current_price) * (1 + 0.01), 2)
-        logger.warning("Option LTP unavailable — spot fallback SL/TP")
+    logger.info(
+        "ATR SL/TP | spot=%.2f | ATR=%.2f | option=%s | SL_spot=%.2f | TP_spot=%.2f | RR=1:%.1f",
+        spot_price, atr_val, option_type, sl_price, tgt_price, atr_tp1_mult/atr_sl_mult
+    )
 
     logger.info(
         "Fyers OPTIONS order | symbol=%s | type=%s | lots=%d | qty=%d | price=%s | sl=%s | tgt=%s",

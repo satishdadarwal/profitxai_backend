@@ -446,6 +446,9 @@ class MultiConfirmCryptoAlgo(_Base):
         buy_score, buy_reasons = _score_buy()
         sell_score, sell_reasons = _score_sell()
 
+        # ATR actual value (for SL/TP in signal_router)
+        atr_actual = atr if atr else round(float(price) * atr_pct / 100, 4)
+
         metadata = {
             "ema_fast": round(ema_fast, 4),
             "ema_slow": round(ema_slow, 4),
@@ -455,6 +458,8 @@ class MultiConfirmCryptoAlgo(_Base):
             "bb_width_pct": round(bb["width_pct"], 2) if bb_ok else None,
             "bb_squeeze": bb_squeeze,
             "atr_pct": round(atr_pct, 3),
+            "atr": round(atr_actual, 4),   # ✅ ATR for SL/TP
+            "spot": float(price),           # ✅ Current price
             "atr_ok": atr_ok,
             "current_vol": current_vol,
             "vol_ma": round(vol_ma, 2) if vol_ma else None,

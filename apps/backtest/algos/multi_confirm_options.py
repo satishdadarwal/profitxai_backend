@@ -201,6 +201,34 @@ def _bollinger(closes: List[float], period: int = 20, std_mult: float = 2.0) -> 
     }
 
 
+def _atr(candles: list, period: int = 14) -> float:
+    """Average True Range — market volatility measure."""
+    if len(candles) < period + 1:
+        return 0.0
+
+    def _h(c): return float(c.get("high", 0)) if isinstance(c, dict) else float(getattr(c, "high", 0))
+    def _l(c): return float(c.get("low", 0))  if isinstance(c, dict) else float(getattr(c, "low", 0))
+    def _c(c): return float(c.get("close", 0)) if isinstance(c, dict) else float(getattr(c, "close", 0))
+
+    trs = []
+    for i in range(1, len(candles)):
+        h = _h(candles[i])
+        l = _l(candles[i])
+        pc = _c(candles[i-1])
+        tr = max(h - l, abs(h - pc), abs(l - pc))
+        trs.append(tr)
+
+    if not trs:
+        return 0.0
+
+    # Wilder smoothing
+    atr_val = sum(trs[:period]) / period
+    for tr in trs[period:]:
+        atr_val = (atr_val * (period - 1) + tr) / period
+
+    return round(atr_val, 2)
+
+
 def _vol_ma(candles: list, period: int) -> Optional[float]:
     def _v(c): return float(c.get("volume", 0)) if isinstance(c, dict) else float(getattr(c, "volume", 0))
     vols = [_v(c) for c in candles[-period:]]
@@ -530,6 +558,9 @@ class MultiConfirmOptionsAlgo(_Base):
         bear_score, bear_reasons = _score_bear()
         min_conf = self._p("min_confidence")
 
+        # ✅ ATR calculate karo — SL/TP ke liye
+        atr_val = _atr(main_candles, period=14)
+
         cfg = NSE_BSE_SYMBOLS[sym]
         metadata = {
             "nse_symbol":     sym,
@@ -552,6 +583,8 @@ class MultiConfirmOptionsAlgo(_Base):
             "bear_score":     round(bear_score, 1),
             "min_confidence": min_conf,
             "trader_type":    "buyer",
+            "atr":            atr_val,
+            "spot":           spot,
         }
 
         # ✅ MOMENTUM HARD GATE — buyer ke liye strong momentum zaroori
