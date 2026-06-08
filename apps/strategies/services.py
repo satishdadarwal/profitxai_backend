@@ -992,6 +992,20 @@ def _place_live_order(strategy, signal):
 
 
 def _place_paper_order(strategy, signal):
+    # ✅ DUPLICATE CHECK
+    try:
+        from apps.orders.models import Order
+        from django.utils import timezone
+        today = timezone.now().date()
+        if Order.objects.filter(
+            strategy_id=strategy.id,
+            status__in=["open", "pending"],
+            created_at__date=today,
+        ).exists():
+            logger.info("Duplicate blocked | strategy=%s", strategy.id)
+            return None
+    except Exception as _e:
+        logger.warning("Duplicate check error: %s", _e)
     from apps.orders.services import create_order
     risk = strategy.risk_config if hasattr(strategy, "risk_config") else {}
     instrument_type = getattr(strategy, "instrument_type", "equity")
