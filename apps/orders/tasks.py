@@ -826,7 +826,7 @@ def sync_fyers_tradebook(self):
                 order_no = t.get("orderNumber", "")
                 if not order_no:
                     continue
-                if OptionTrade.objects.filter(metadata__fyers_order_no=order_no).exists():
+                if Order.objects.filter(exchange_order_id=order_no).exists():
                     continue
 
                 symbol = t.get("symbol", "")
