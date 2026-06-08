@@ -1087,15 +1087,37 @@ def _fyers_options_order(strategy, signal, fyers, account, qty: int, risk: dict,
             "Fyers options order placed | lots=%d | qty=%d | order_id=%s | exchange_id=%s",
             qty, actual_qty, order.id if order else None, exchange_order_id,
         )
-        # ── GTT SL/Target order place karo ──────────────────────
+        # ── GTT SL/Target order place karo (option premium pe) ──
         if order and exchange_order_id:
             try:
+                # Option LTP fetch karo GTT ke liye
+                gtt_sl = sl_price
+                gtt_tgt = tgt_price
+                try:
+                    _quotes = fyers.quotes(data={"symbols": option_symbol})
+                    _ltp = float(_quotes.get("d", [{}])[0].get("v", {}).get("lp", 0))
+                    if _ltp > 0:
+                        _sl_pct = float(risk.get("sl_pct", 25.0))
+                        _tp_pct = float(risk.get("target_pct", 75.0))
+                        if option_type == "PE":
+                            gtt_sl  = round(_ltp * (1 + _sl_pct / 100), 2)  # PE seller exit upar
+                            gtt_tgt = round(_ltp * (1 - _tp_pct / 100), 2)  # PE profit neeche
+                        else:
+                            gtt_sl  = round(_ltp * (1 - _sl_pct / 100), 2)  # CE SL neeche
+                            gtt_tgt = round(_ltp * (1 + _tp_pct / 100), 2)  # CE TP upar
+                        logger.info(
+                            "GTT option levels | LTP=%.2f | SL=%.2f | TGT=%.2f | type=%s",
+                            _ltp, gtt_sl, gtt_tgt, option_type
+                        )
+                except Exception as _qe:
+                    logger.warning("Option LTP fetch failed for GTT | %s | using spot levels", _qe)
+
                 _place_fyers_gtt(
                     fyers=fyers,
                     option_symbol=option_symbol,
                     actual_qty=actual_qty,
-                    sl_price=sl_price,
-                    tgt_price=tgt_price,
+                    sl_price=gtt_sl,
+                    tgt_price=gtt_tgt,
                     option_type=option_type,
                 )
             except Exception as gtt_err:
