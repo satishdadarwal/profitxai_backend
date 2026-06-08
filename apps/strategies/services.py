@@ -611,7 +611,7 @@ async def execute_cycle_async(strategy, symbol: Optional[str] = None) -> "AlgoSi
         open_order = await database_sync_to_async(
             lambda: Order.objects.filter(
                 strategy=strategy,
-                asset__symbol=target_symbol,
+                
                 status__in=(Order.Status.OPEN, Order.Status.PARTIAL),
                 mode=strategy.mode,  # ✅ paper/live conflict fix
             ).first()
@@ -730,7 +730,7 @@ def _execute_cycle_inner(strategy, target_symbol: str) -> "AlgoSignal":
     # aur vice versa. Dono independently run ho sakti hain bina conflict ke.
     open_order = Order.objects.filter(
         strategy=strategy,
-        asset__symbol=target_symbol,
+        
         status__in=(Order.Status.OPEN, Order.Status.PARTIAL),
         mode=strategy.mode,  # ✅ sirf same mode ke orders check karo
     ).first()
@@ -774,7 +774,7 @@ def _handle_ict_signal(
         return signal
 
     open_order = Order.objects.filter(
-        strategy=strategy, asset__symbol=target_symbol,
+        strategy=strategy, 
         status__in=(Order.Status.OPEN, Order.Status.PARTIAL),
         mode=strategy.mode,  # ✅ paper/live conflict fix
     ).first()
@@ -828,7 +828,7 @@ async def _handle_ict_signal_async(
 
     open_order = await database_sync_to_async(
         lambda: Order.objects.filter(
-            strategy=strategy, asset__symbol=target_symbol,
+            strategy=strategy, 
             status__in=(Order.Status.OPEN, Order.Status.PARTIAL),
             mode=strategy.mode,  # ✅ paper/live conflict fix
         ).first()
