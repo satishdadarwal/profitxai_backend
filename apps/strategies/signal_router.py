@@ -1202,113 +1202,28 @@ def _fyers_equity_order(strategy, signal, fyers, account, qty: int, risk: dict, 
     current_price = float(signal.price)
 
     fyers_symbol = f"NSE:{symbol}-EQ"
+    # ✅ ATR-based SL/TP for crypto (1:3 RR default)
+    meta = getattr(signal, "metadata", {}) or {}
+    atr_val = float(meta.get("atr", 0))
+    if atr_val <= 0:
+        atr_val = current_price * 0.005  # fallback 0.5%
 
-    sl_pct = float(risk.get("sl_pct", 0.5))
-    target_pct = float(risk.get("target_pct", 1.0))
-
-    if signal_type == "buy":
-        sl_price = round(current_price * (1 - sl_pct / 100), 2)
-        tgt_price = round(current_price * (1 + target_pct / 100), 2)
-        side = 1
-    else:
-        sl_price = round(current_price * (1 + sl_pct / 100), 2)
-        tgt_price = round(current_price * (1 - target_pct / 100), 2)
-        side = -1
-
-    order_data = {
-        "symbol": fyers_symbol,
-        "qty": qty,
-        "type": 2,
-        "side": side,
-        "productType": "CNC",  # Cash and carry for equity
-        "limitPrice": 0,
-        "stopPrice": 0,
-        "validity": "DAY",
-        "disclosedQty": 0,
-        "offlineOrder": False,
-    }
-
-    resp = fyers.place_order(data=order_data)
-
-    if resp.get("s") == "ok":
-        exchange_order_id = resp.get("id")
-        order = create_order(
-            strategy=strategy,
-            symbol=fyers_symbol,
-            side=signal_type,
-            quantity=qty,
-            price=Decimal(str(current_price)),
-            sl_price=Decimal(str(sl_price)),
-            target_price=Decimal(str(tgt_price)),
-            instrument_type="equity",
-            broker=strategy.broker,
-            exchange_order_id=exchange_order_id,
-            mode="live",  # FIX: broker fn = always live
-        )
-        return order
-    else:
-        reject_reason = resp.get("message", "Unknown error")
-        logger.error("Fyers equity order FAILED | resp=%s", resp)
-        _ws_notify_failure(effective_user or strategy.user, strategy.algo_name, reject_reason)
-        _save_rejected_broker_order(
-            strategy=strategy,
-            signal=signal,
-            user=effective_user or strategy.user,
-            account=account,
-            reason=f"Broker rejected: {reject_reason}",
-            broker_response=resp,
-        )
-        return None
-
-
-# ─────────────────────────────────────────────────────────────────
-#  DELTA EXCHANGE ORDER PLACEMENT
-# ─────────────────────────────────────────────────────────────────
-
-
-def _place_delta_order(strategy, signal, instrument_type: str, user=None, account=None):
-    """
-    Delta Exchange pe order place karo.
-    instrument_type:
-      - 'futures' → futures contract
-      - 'perp'    → perpetual contract (most common)
-
-    user, account: Global strategy routing ke liye subscriber ka user/account pass karo.
-    """
-    from apps.brokers.models import BrokerAccount
-    from apps.orders.services import create_order
-
-    # ── Effective user determine karo ─────────────────────────────
-    effective_user = user or strategy.user
-
-    # ── Broker account fetch (ya use passed account) ───────────────
-    if account is None:
-        account = BrokerAccount.objects.filter(
-            user=effective_user,
-            broker="delta",
-            is_active=True,
-            is_verified=True,
-        ).first()
-
-    if not account:
-        logger.error("Delta account not connected for user %s", effective_user.pk)
-        return None
-
-    symbol = signal.symbol  # e.g. 'BTCUSDT'
-    signal_type = signal.signal_type  # 'buy' ya 'sell'
-    current_price = float(signal.price)
-
-    risk = strategy.risk_config
-    qty = int(risk.get("qty", 1))
-    sl_pct = float(risk.get("sl_pct", 0.5))
-    target_pct = float(risk.get("target_pct", 1.0))
+    atr_sl_mult = float(risk.get("atr_sl_mult", 1.0))
+    atr_tp_mult = float(risk.get("atr_tp_mult", 3.0))
 
     if signal_type == "buy":
-        sl_price = round(current_price * (1 - sl_pct / 100), 2)
-        tgt_price = round(current_price * (1 + target_pct / 100), 2)
+        sl_price  = round(current_price - (atr_sl_mult * atr_val), 2)
+        tgt_price = round(current_price + (atr_tp_mult * atr_val), 2)
         side = "buy"
     else:
-        sl_price = round(current_price * (1 + sl_pct / 100), 2)
+        sl_price  = round(current_price + (atr_sl_mult * atr_val), 2)
+        tgt_price = round(current_price - (atr_tp_mult * atr_val), 2)
+        side = "sell"
+
+    logger.info(
+        "Delta ATR SL/TP | %s | price=%.2f | ATR=%.2f | SL=%.2f | TP=%.2f | RR=1:%.1f",
+        symbol, current_price, atr_val, sl_price, tgt_price, atr_tp_mult/atr_sl_mult
+    )
         tgt_price = round(current_price * (1 - target_pct / 100), 2)
         side = "sell"
 
