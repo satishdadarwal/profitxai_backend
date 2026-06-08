@@ -36,15 +36,12 @@ class OrderViewSet(viewsets.ModelViewSet):
         order = self.get_object()
         meta = order.broker_response or {}
         if 'notes' in request.data:
-            # notes Order.notes field mein save karo
-            order.notes = request.data['notes']
+            order.journal_notes = request.data['notes']
         if 'tags' in request.data:
-            meta['tags'] = request.data['tags']
+            order.tags = request.data['tags']
         if 'emoji_reaction' in request.data:
-            meta['emoji'] = request.data['emoji_reaction']
-        order.metadata = meta
-        order.broker_response = meta
-        order.save(update_fields=['notes', 'broker_response', 'updated_at'])
+            order.emoji_reaction = request.data['emoji_reaction']
+        order.save(update_fields=['journal_notes', 'tags', 'emoji_reaction', 'updated_at'])
         return Response({"status": "ok", "id": str(order.id)})
 
 
@@ -118,15 +115,12 @@ class TradeViewSet(viewsets.ModelViewSet):
         order = self.get_object()
         meta = order.broker_response or {}
         if 'notes' in request.data:
-            # notes Order.notes field mein save karo
-            order.notes = request.data['notes']
+            order.journal_notes = request.data['notes']
         if 'tags' in request.data:
-            meta['tags'] = request.data['tags']
+            order.tags = request.data['tags']
         if 'emoji_reaction' in request.data:
-            meta['emoji'] = request.data['emoji_reaction']
-        order.metadata = meta
-        order.broker_response = meta
-        order.save(update_fields=['notes', 'broker_response', 'updated_at'])
+            order.emoji_reaction = request.data['emoji_reaction']
+        order.save(update_fields=['journal_notes', 'tags', 'emoji_reaction', 'updated_at'])
         return Response({"status": "ok", "id": str(order.id)})
     
     @action(detail=True, methods=['patch'])
@@ -206,15 +200,12 @@ class TradeJournalEntryViewSet(viewsets.ModelViewSet):
         order = self.get_object()
         meta = order.broker_response or {}
         if 'notes' in request.data:
-            # notes Order.notes field mein save karo
-            order.notes = request.data['notes']
+            order.journal_notes = request.data['notes']
         if 'tags' in request.data:
-            meta['tags'] = request.data['tags']
+            order.tags = request.data['tags']
         if 'emoji_reaction' in request.data:
-            meta['emoji'] = request.data['emoji_reaction']
-        order.metadata = meta
-        order.broker_response = meta
-        order.save(update_fields=['notes', 'broker_response', 'updated_at'])
+            order.emoji_reaction = request.data['emoji_reaction']
+        order.save(update_fields=['journal_notes', 'tags', 'emoji_reaction', 'updated_at'])
         return Response({"status": "ok", "id": str(order.id)})
 # apps/orders/views.py
 # ADD THIS TO EXISTING FILE - Daily Performance Calendar View
@@ -835,28 +826,33 @@ class TradeJournalListView(APIView):
             if side == "long": side = "buy"
             elif side == "short": side = "sell"
             price = float(o.avg_fill_price) if o.avg_fill_price and float(o.avg_fill_price) > 0 else float(o.limit_price or 0)
-            opt_type = "CE" if "CE" in sym else "PE" if "PE" in sym else ""
-            LOT_SIZES = {"NIFTY":65,"BANKNIFTY":30,"FINNIFTY":40,"MIDCPNIFTY":120,"SENSEX":10}
-            underlying = next((k for k in LOT_SIZES if k in sym.upper()), None)
-            lot_size = LOT_SIZES.get(underlying, 1)
+            # Use new journal fields if available
+            opt_type = o.option_type or ("CE" if "CE" in sym else "PE" if "PE" in sym else "")
             qty = float(o.quantity or 0)
-            lots = int(qty // lot_size) if lot_size > 1 and qty > 0 else None
-            # journal metadata from Order metadata field
-            meta = o.broker_response or {}
+            lots = o.lots
+            if lots is None:
+                LOT_SIZES = {"NIFTY":65,"BANKNIFTY":30,"FINNIFTY":40,"MIDCPNIFTY":120,"SENSEX":10}
+                underlying = next((k for k in LOT_SIZES if k in sym.upper()), None)
+                lot_size = LOT_SIZES.get(underlying, 1)
+                lots = int(qty // lot_size) if lot_size > 1 and qty > 0 else None
+
             results.append({
                 "id": str(o.id), "order_id": str(o.id),
-                "symbol": sym, "asset_name": o.asset.symbol if o.asset else sym,
+                "symbol": o.symbol_display or sym,
+                "asset_name": o.asset.symbol if o.asset else sym,
                 "market_type": mtype,
                 "market_display": "Crypto Market" if is_crypto else "Indian Market",
                 "side": side, "mode": o.mode or "live",
                 "quantity": qty, "price": price,
                 "amount": qty * price, "fee": 0.0,
                 "realized_pnl": None, "net_pnl": None,
-                "notes": "",  # journal notes alag field se aayenge
-                "tags": meta.get("tags", []),
-                "emoji_reaction": meta.get("emoji", ""),
+                "notes": o.journal_notes or "",
+                "tags": o.tags or [],
+                "emoji_reaction": o.emoji_reaction or "",
                 "strike": None, "lots": lots, "option_type": opt_type,
                 "leverage": None, "funding_fee": None,
+                "broker": o.broker or ("fyers" if not is_crypto else "delta"),
+                "instrument_type": o.instrument_type or ("options" if opt_type else "equity"),
                 "created_at": o.created_at.isoformat(),
             })
 

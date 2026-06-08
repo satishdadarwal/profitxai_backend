@@ -846,8 +846,19 @@ def sync_fyers_tradebook(self):
                     if float(existing.avg_fill_price or 0) == 0:
                         existing.avg_fill_price = price
                         existing.execution_status = "filled"
-                        existing.save(update_fields=["avg_fill_price", "execution_status", "updated_at"])
+                        existing.symbol_display = existing.symbol_display or symbol
+                        existing.save(update_fields=["avg_fill_price", "execution_status", "symbol_display", "updated_at"])
                     continue
+                # underlying se lot_size
+                LOT_SIZES = {"NIFTY":65,"BANKNIFTY":30,"FINNIFTY":40,"MIDCPNIFTY":120,"SENSEX":10}
+                u_sym = next((k for k in LOT_SIZES if k in symbol.upper()), None)
+                lot_size = LOT_SIZES.get(u_sym, 1)
+                lots_val = int(qty // lot_size) if lot_size > 1 and qty > 0 else None
+                opt = "CE" if symbol.endswith("CE") else "PE" if symbol.endswith("PE") else ""
+                is_crypto = any(k in symbol.upper() for k in ["BTC","ETH","SOL","USDT","PERP"])
+                instr = "perp" if is_crypto else "options" if opt else "equity"
+                broker_slug = "delta" if is_crypto else "fyers"
+
                 Order.objects.create(
                     user=account.user,
                     asset=asset,
@@ -860,6 +871,14 @@ def sync_fyers_tradebook(self):
                     execution_status="filled",
                     notes=symbol,
                     exchange_order_id=order_no,
+                    symbol_display=symbol,
+                    broker=broker_slug,
+                    instrument_type=instr,
+                    option_type=opt,
+                    lots=lots_val,
+                    tags=[],
+                    emoji_reaction="",
+                    journal_notes="",
                 )
                 saved += 1
 
