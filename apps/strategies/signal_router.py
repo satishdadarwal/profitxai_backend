@@ -22,6 +22,26 @@ logger = logging.getLogger(__name__)
 
 
 def route_and_place_order(strategy, signal) -> Optional[object]:
+    # ✅ DUPLICATE CHECK — same strategy+symbol pe open order already hai?
+    try:
+        from apps.orders.models import Order
+        sym = str(getattr(signal, "symbol", "") or "").upper()
+        clean_sym = sym.replace("NSE:", "").replace("-INDEX", "").replace("-EQ", "").strip()
+        open_order = Order.objects.filter(
+            strategy_id=strategy.id,
+            status__in=["open", "pending", "filled"],
+        ).filter(
+            asset__symbol__icontains=clean_sym
+        ).exists()
+        if open_order:
+            logger.info(
+                "Duplicate order blocked | strategy=%s | symbol=%s | already open",
+                strategy.id, sym,
+            )
+            return None
+    except Exception as _de:
+        logger.warning("Duplicate check error: %s", _de)
+
     # ── Market hours guard (NSE: 9:15–15:30 IST) ──
     # Crypto (Delta) always open; skip check for paper mode too
     # ✅ FIX: broker se is_crypto check nahi — paper mode mein broker=None hota hai.
