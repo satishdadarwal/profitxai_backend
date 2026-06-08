@@ -626,8 +626,7 @@ class ICTScreener:
         if not market_open:
             logger.info("ICTScreener: Indian market closed — crypto only scan")
             # Sirf crypto scan karo
-            if symbols is None:
-                symbols = []  # Indian symbols skip
+            symbols = []  # Indian symbols skip
 
         from apps.strategies.ict_integration import FyersDataProvider, DeltaDataProvider
         from .ict import run_mtf_analysis

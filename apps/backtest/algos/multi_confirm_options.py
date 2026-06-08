@@ -84,7 +84,7 @@ NSE_BSE_SYMBOLS = {
     # NSE Indices
     "NIFTY":       {"lot_size": 65,  "strike_step": 50,  "exchange": "NSE", "expiry_day": 3},  # Thursday
     "BANKNIFTY":   {"lot_size": 30,  "strike_step": 100, "exchange": "NSE", "expiry_day": 3},
-    "FINNIFTY":    {"lot_size": 60,  "strike_step": 50,  "exchange": "NSE", "expiry_day": 1},  # Tuesday
+    "FINNIFTY":    {"lot_size": 40,  "strike_step": 50,  "exchange": "NSE", "expiry_day": 1},  # Tuesday
     "MIDCPNIFTY":  {"lot_size": 120, "strike_step": 25,  "exchange": "NSE", "expiry_day": 3},
     # BSE Indices
     "SENSEX":      {"lot_size": 10,  "strike_step": 100, "exchange": "BSE", "expiry_day": 4},  # Friday
