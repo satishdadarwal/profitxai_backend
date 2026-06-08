@@ -574,7 +574,7 @@ class ICTScreener:
         signals  = await screener.scan_all(['NIFTY', 'BANKNIFTY'])
     """
 
-    SYMBOLS = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]
+    SYMBOLS = ["NIFTY", "BANKNIFTY", "SENSEX"]
     CRYPTO_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"]
 
     TF_CONFIG = {

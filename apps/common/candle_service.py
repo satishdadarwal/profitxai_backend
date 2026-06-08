@@ -580,7 +580,7 @@ def fetch_candles_for_strategy(
     try:
         if _djcache and _ck and candles:
             import pickle
-            _djcache.set(_ck, pickle.dumps(candles), timeout=300)
+            _djcache.set(_ck, pickle.dumps(candles), timeout=900)
     except Exception:
         pass
     return candles
