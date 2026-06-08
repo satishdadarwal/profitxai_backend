@@ -30,6 +30,23 @@ class OrderViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)
 
+    @action(detail=True, methods=['patch'])
+    def update_journal(self, request, pk=None):
+        """PATCH /api/v1/orders/orders/{id}/update_journal/ — notes/tags/emoji save"""
+        order = self.get_object()
+        meta = order.broker_response or {}
+        if 'notes' in request.data:
+            # notes Order.notes field mein save karo
+            order.notes = request.data['notes']
+        if 'tags' in request.data:
+            meta['tags'] = request.data['tags']
+        if 'emoji_reaction' in request.data:
+            meta['emoji'] = request.data['emoji_reaction']
+        order.metadata = meta
+        order.broker_response = meta
+        order.save(update_fields=['notes', 'broker_response', 'updated_at'])
+        return Response({"status": "ok", "id": str(order.id)})
+
 
 class TradeViewSet(viewsets.ModelViewSet):
     """
@@ -94,6 +111,23 @@ class TradeViewSet(viewsets.ModelViewSet):
     
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)
+
+    @action(detail=True, methods=['patch'])
+    def update_journal(self, request, pk=None):
+        """PATCH /api/v1/orders/orders/{id}/update_journal/ — notes/tags/emoji save"""
+        order = self.get_object()
+        meta = order.broker_response or {}
+        if 'notes' in request.data:
+            # notes Order.notes field mein save karo
+            order.notes = request.data['notes']
+        if 'tags' in request.data:
+            meta['tags'] = request.data['tags']
+        if 'emoji_reaction' in request.data:
+            meta['emoji'] = request.data['emoji_reaction']
+        order.metadata = meta
+        order.broker_response = meta
+        order.save(update_fields=['notes', 'broker_response', 'updated_at'])
+        return Response({"status": "ok", "id": str(order.id)})
     
     @action(detail=True, methods=['patch'])
     def update_journal(self, request, pk=None):
@@ -165,6 +199,23 @@ class TradeJournalEntryViewSet(viewsets.ModelViewSet):
     
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)
+
+    @action(detail=True, methods=['patch'])
+    def update_journal(self, request, pk=None):
+        """PATCH /api/v1/orders/orders/{id}/update_journal/ — notes/tags/emoji save"""
+        order = self.get_object()
+        meta = order.broker_response or {}
+        if 'notes' in request.data:
+            # notes Order.notes field mein save karo
+            order.notes = request.data['notes']
+        if 'tags' in request.data:
+            meta['tags'] = request.data['tags']
+        if 'emoji_reaction' in request.data:
+            meta['emoji'] = request.data['emoji_reaction']
+        order.metadata = meta
+        order.broker_response = meta
+        order.save(update_fields=['notes', 'broker_response', 'updated_at'])
+        return Response({"status": "ok", "id": str(order.id)})
 # apps/orders/views.py
 # ADD THIS TO EXISTING FILE - Daily Performance Calendar View
 
@@ -785,17 +836,26 @@ class TradeJournalListView(APIView):
             elif side == "short": side = "sell"
             price = float(o.avg_fill_price or o.limit_price or 0)
             opt_type = "CE" if "CE" in sym else "PE" if "PE" in sym else ""
+            LOT_SIZES = {"NIFTY":65,"BANKNIFTY":30,"FINNIFTY":40,"MIDCPNIFTY":120,"SENSEX":10}
+            underlying = next((k for k in LOT_SIZES if k in sym.upper()), None)
+            lot_size = LOT_SIZES.get(underlying, 1)
+            qty = float(o.quantity or 0)
+            lots = int(qty // lot_size) if lot_size > 1 and qty > 0 else None
+            # journal metadata from Order metadata field
+            meta = o.broker_response or {}
             results.append({
                 "id": str(o.id), "order_id": str(o.id),
                 "symbol": sym, "asset_name": o.asset.symbol if o.asset else sym,
                 "market_type": mtype,
                 "market_display": "Crypto Market" if is_crypto else "Indian Market",
                 "side": side, "mode": o.mode or "live",
-                "quantity": float(o.quantity or 0), "price": price,
-                "amount": float(o.quantity or 0) * price, "fee": 0.0,
+                "quantity": qty, "price": price,
+                "amount": qty * price, "fee": 0.0,
                 "realized_pnl": None, "net_pnl": None,
-                "notes": "", "tags": [], "emoji_reaction": "",
-                "strike": None, "lots": None, "option_type": opt_type,
+                "notes": "",  # journal notes alag field se aayenge
+                "tags": meta.get("tags", []),
+                "emoji_reaction": meta.get("emoji", ""),
+                "strike": None, "lots": lots, "option_type": opt_type,
                 "leverage": None, "funding_fee": None,
                 "created_at": o.created_at.isoformat(),
             })
