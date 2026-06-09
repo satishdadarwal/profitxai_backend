@@ -10,6 +10,7 @@ from .views import (
     AssetListView,
     BulkQuoteView,
     CandleDataView,
+    ChartPairView,
     LiveQuoteView,
     QuoteSearchView,
     SymbolListView,
@@ -45,5 +46,6 @@ urlpatterns = [
     # ── Symbols (short names list) ────────────────────────────
     path("symbols/", SymbolListView.as_view(), name="symbol_list"),
 
-    path("ticker/", public_ticker, name="public_ticker"),  
+    path("ticker/", public_ticker, name="public_ticker"),
+    path("chart-pair/", ChartPairView.as_view(), name="chart_pair"),
 ]
