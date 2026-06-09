@@ -689,9 +689,14 @@ class VixGreeksExpiryBuyerAlgo(BaseAlgo):
     Wrapper for VIX + Greeks + ICT based expiry buyer strategy.
     Runs 1 PM - 3 PM IST, DTE <= 3, VIX < 18.
     """
-    def generate_signal(self, symbol: str, candles: list, price: float, **kwargs) -> AlgoSignal:
+    def generate_signal(self, symbol: str, price: float, candles: list = None, **kwargs) -> AlgoSignal:
         try:
             from apps.backtest.algos.vix_greeks_expiry_buyer import generate_signal as _gen
+            # Live cycle mein htf/mtf/ltf pass hota hai, backtest mein candles
+            if candles is None:
+                ltf = kwargs.get('ltf', [])
+                mtf = kwargs.get('mtf', [])
+                candles = ltf if ltf else mtf if mtf else []
             from apps.options.nse_fetcher import fetch_nse_option_chain
             from apps.options.signal_engine import compute_pcr, find_oi_walls, compute_max_pain
             from apps.options.black_scholes import greeks_from_chain
@@ -754,7 +759,7 @@ class VixGreeksExpiryBuyerAlgo(BaseAlgo):
                 max_pain=max_pain, call_wall=call_wall, put_wall=put_wall,
                 ce_delta=ce_delta, pe_delta=pe_delta,
                 theta=theta, gamma=gamma, iv_rank=iv_rank,
-                parameters=self.parameters,
+                parameters=self.params,
             )
 
             if result.signal in ('buy_ce', 'buy_pe'):
