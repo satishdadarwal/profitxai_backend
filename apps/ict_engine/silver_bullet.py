@@ -970,7 +970,7 @@ def execute_silver_bullet_cycle(strategy, symbol: str) -> dict:
                 status__in=["open", "pending", "filled"],
                 mode=_check_mode,
                 created_at__date=today,
-            ).exists()
+            ).exclude(symbol_display='').exists()
 
         if already_open:
             logger.info(

@@ -116,6 +116,7 @@ def place_order(
             notes=notes,
             strategy=strategy,
             broker_account=broker_account,
+            symbol_display=asset_symbol or "",
         )
 
     logger.info(
