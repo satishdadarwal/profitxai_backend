@@ -952,7 +952,7 @@ def _calculate_options_qty(strategy, signal, fyers, risk: dict) -> int:
                 _risk_pct = float(_tp.risk_per_trade_pct) if _tp.risk_per_trade_pct else 0.10
             except Exception:
                 _risk_pct = 0.10
-            lots = calculate_lots(base, option_premium, _capital, _risk_pct)
+            lots = calculate_lots(base, option_premium, _capital, _risk_pct, dte=dte)
             lots = min(lots, max_lots)
             logger.info(
                 "Options qty | wallet=%.0f | risk_pct=%.0f%% | premium=%.1f | lot_size=%d | lots=%d",

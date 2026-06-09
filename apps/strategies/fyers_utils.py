@@ -42,7 +42,7 @@ STRIKE_STEPS = {
 # Monthly futures: 3-char (JAN, FEB ... DEC)
 _MONTHS = ["", "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
            "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]
-def calculate_lots(symbol: str, premium: float, capital: float, risk_pct: float = 0.10) -> int:
+def calculate_lots(symbol: str, premium: float, capital: float, risk_pct: float = 0.10, dte: int = 99, **kwargs) -> int:
     """
     Universal lot calculator — NIFTY/BANKNIFTY/SENSEX/FINNIFTY sab ke liye.
     
@@ -69,7 +69,22 @@ def calculate_lots(symbol: str, premium: float, capital: float, risk_pct: float 
     risk_amount = capital * risk_pct
     cost_per_lot = premium * lot_size
     lots = max(1, math.floor(risk_amount / cost_per_lot))
-    return lots
+
+    # ── DTE-based lot cap (expiry day risk management) ────────────
+    # dte from parameter directly
+    if dte == 0:
+        # Expiry day — sirf 1 lot, premium < 15 toh skip
+        if premium < 15:
+            return 0  # caller will skip
+        lots = 1
+    elif dte == 1:
+        lots = min(lots, 1)   # 1 lot max
+    elif dte == 2:
+        lots = min(lots, 2)   # 2 lots max
+    elif dte == 3:
+        lots = min(lots, 3)   # 3 lots max
+
+    return max(1, lots)
 
 
 
