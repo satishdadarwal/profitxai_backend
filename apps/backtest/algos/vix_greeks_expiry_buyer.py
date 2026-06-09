@@ -271,6 +271,28 @@ def generate_signal(
             reject_reasons=[f'DTE={dte} > {DTE_MAX} — not expiry week']
         )
 
+    # ── Expiry Day Check (Post Sep 2025 SEBI rules) ───────────────
+    # NSE: NIFTY weekly=Tuesday(1), BANKNIFTY/FINNIFTY monthly only (DTE<=2)
+    # BSE: SENSEX weekly=Thursday(3)
+    _sym = symbol.upper()
+    _WEEKLY = {'NIFTY': 1, 'SENSEX': 3}
+    _MONTHLY_ONLY = {'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY'}
+    if _sym in _WEEKLY:
+        if weekday != _WEEKLY[_sym]:
+            return VixGreeksSignal(
+                signal='hold', score=0, option_type='', symbol=symbol,
+                spot=spot, vix=vix, dte=dte, delta=0, theta=theta,
+                gamma=gamma, sl_pct=SL_PCT, tp_pct=TP_PCT, rr=3.0,
+                reject_reasons=[f'Not expiry day for {symbol} (need weekday={_WEEKLY[_sym]}, today={weekday})']
+            )
+    elif _sym in _MONTHLY_ONLY and dte > 2:
+        return VixGreeksSignal(
+            signal='hold', score=0, option_type='', symbol=symbol,
+            spot=spot, vix=vix, dte=dte, delta=0, theta=theta,
+            gamma=gamma, sl_pct=SL_PCT, tp_pct=TP_PCT, rr=3.0,
+            reject_reasons=[f'{symbol} monthly only — DTE={dte} > 2, too early']
+        )
+
     reasons.append(f'DTE={dte} ✅')
     score += 5
 
