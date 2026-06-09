@@ -732,6 +732,27 @@ def sync_fyers_pnl(self):
                     ),
                 }
             )
+            # ── Auto-close DB orders agar Fyers pe position closed hai ──
+            from apps.orders.models import Order
+            net_positions = positions.get("netPositions", [])
+            open_symbols = set(
+                p["symbol"] for p in net_positions
+                if int(p.get("netQty", 0)) != 0
+            )
+            # DB mein filled/open orders jo Fyers pe close ho gaye
+            db_open = Order.objects.filter(
+                user=account.user, mode="live",
+                status__in=["open", "filled"],
+            ).exclude(symbol_display="")
+            closed_count = 0
+            for order in db_open:
+                if order.symbol_display not in open_symbols:
+                    order.status = "closed"
+                    order.save(update_fields=["status", "updated_at"])
+                    closed_count += 1
+            if closed_count:
+                logger.info("Auto-closed %d DB orders | user=%s", closed_count, account.user.email)
+
             logger.info("Fyers P&L synced | user=%s | realized=%.2f | unrealized=%.2f",
                        account.user.email, realized, unrealized)
         except Exception as e:
