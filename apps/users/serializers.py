@@ -175,6 +175,15 @@ class ResetPasswordSerializer(serializers.Serializer):
 
 # ── Profile ───────────────────────────────────────────────────
 class UserProfileSerializer(serializers.ModelSerializer):
+    trading_profile = serializers.SerializerMethodField()
+
+    def get_trading_profile(self, obj) -> dict:
+        try:
+            from apps.risk.models import TradingProfile
+            tp = TradingProfile.objects.get(user=obj)
+            return {"exit_mode": tp.exit_mode, "risk_per_trade_pct": str(tp.risk_per_trade_pct or "0.10")}
+        except Exception:
+            return {"exit_mode": "gtt_oco", "risk_per_trade_pct": "0.10"}
     # ✅ plan_config — subscription se lao, fallback hardcoded
     plan_config = serializers.SerializerMethodField()
 
@@ -192,7 +201,8 @@ class UserProfileSerializer(serializers.ModelSerializer):
             "plan_expires",
             "is_verified",
             "date_joined",
-            "plan_config",   # ✅ Flutter ko yahi chahiye
+            "plan_config",
+            "trading_profile",
         ]
         read_only_fields = [
             "id",

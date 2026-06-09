@@ -188,7 +188,15 @@ class ProfileView(APIView):
             return Response({"success": False, "errors": s.errors}, status=400)
 
         s.save()
-        return ok(s.data, "Profile updated")
+        # trading_profile update
+        tp_data = request.data.get("trading_profile", {})
+        if tp_data and "exit_mode" in tp_data:
+            from apps.risk.models import TradingProfile
+            tp, _ = TradingProfile.objects.get_or_create(user=request.user)
+            if tp_data["exit_mode"] in ["gtt_oco", "smart_trail", "both"]:
+                tp.exit_mode = tp_data["exit_mode"]
+                tp.save(update_fields=["exit_mode", "updated_at"])
+        return ok(UserProfileSerializer(request.user).data, "Profile updated")
 
 
 # ── Broker List ───────────────────────────────────────────────
