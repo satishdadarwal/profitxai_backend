@@ -165,6 +165,16 @@ class ConfluenceOptionsAlgo:
         if len(candles_5m) < 30:
             return None
 
+        # ── VIX Filter ───────────────────────────────────────────────────────
+        try:
+            import yfinance as yf
+            vix = float(yf.Ticker("^INDIAVIX").fast_info.get("lastPrice", 14.0) or 14.0)
+        except Exception:
+            vix = 14.0
+        if vix > 20.0:
+            logger.debug("ConfluenceOptions VIX=%.1f > 20 — skipping", vix)
+            return None
+
         closes_5m  = [c["close"] if isinstance(c, dict) else c.close for c in candles_5m]
         closes_15m = [c["close"] if isinstance(c, dict) else c.close for c in candles_15m] if candles_15m else closes_5m
         spot       = closes_5m[-1]
@@ -251,6 +261,23 @@ class ConfluenceOptionsAlgo:
                 # ATR SL/TP
                 sl_spot  = round(spot - self._p("atr_sl_mult") * atr_val, 2)
                 tgt_spot = round(spot + self._p("atr_tp_mult") * atr_val, 2)
+                # ── Greeks filter ──────────────────────────────────
+                try:
+                    from apps.options.black_scholes import compute_greeks
+                    import math
+                    T = max(dte / 365, 0.001)
+                    g = compute_greeks(spot, strike, T, 0.065, 0.15, 'call')
+                    ce_delta = g['delta']
+                    ce_theta = g['theta']
+                    ce_gamma = g['gamma']
+                    if not (0.25 <= ce_delta <= 0.65):
+                        logger.debug("ConfluenceOptions CE delta=%.3f out of range", ce_delta)
+                        return None
+                    if ce_theta < -15:
+                        logger.debug("ConfluenceOptions CE theta=%.2f too high decay", ce_theta)
+                        return None
+                except Exception:
+                    ce_delta = ce_theta = ce_gamma = None
                 logger.info(
                     "✅ ConfluenceOptions BUY CE | %s | spot=%.2f | strike=%d | "
                     "combined=%.1f | SB=%.1f | MC=%.1f | RSI=%.1f | DTE=%d",
@@ -282,6 +309,22 @@ class ConfluenceOptionsAlgo:
                 dte    = _dte(symbol)
                 sl_spot  = round(spot + self._p("atr_sl_mult") * atr_val, 2)
                 tgt_spot = round(spot - self._p("atr_tp_mult") * atr_val, 2)
+                # ── Greeks filter ──────────────────────────────────
+                try:
+                    from apps.options.black_scholes import compute_greeks
+                    T = max(dte / 365, 0.001)
+                    g = compute_greeks(spot, strike, T, 0.065, 0.15, 'put')
+                    pe_delta = abs(g['delta'])
+                    pe_theta = g['theta']
+                    pe_gamma = g['gamma']
+                    if not (0.25 <= pe_delta <= 0.65):
+                        logger.debug("ConfluenceOptions PE delta=%.3f out of range", pe_delta)
+                        return None
+                    if pe_theta < -15:
+                        logger.debug("ConfluenceOptions PE theta=%.2f too high decay", pe_theta)
+                        return None
+                except Exception:
+                    pe_delta = pe_theta = pe_gamma = None
                 logger.info(
                     "✅ ConfluenceOptions BUY PE | %s | spot=%.2f | strike=%d | "
                     "combined=%.1f | SB=%.1f | MC=%.1f | RSI=%.1f | DTE=%d",
