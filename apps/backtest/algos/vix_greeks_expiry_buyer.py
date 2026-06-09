@@ -301,7 +301,13 @@ def generate_signal(
         score += 20
         reasons.append(f'Liquidity sweep {sweep["type"]} @ {sweep["level"]:.0f} ✅ (+20)')
     else:
-        rejects.append('No liquidity sweep detected (-)')
+        # Sweep mandatory for ICT setup — without sweep signal not valid
+        return VixGreeksSignal(
+            signal='hold', score=score, option_type='', symbol=symbol,
+            spot=spot, vix=vix, dte=dte, delta=0, theta=theta,
+            gamma=gamma, sl_pct=SL_PCT, tp_pct=TP_PCT, rr=3.0,
+            reasons=reasons, reject_reasons=['No liquidity sweep — ICT setup invalid']
+        )
 
     if mss['mss']:
         score += 20
@@ -372,10 +378,10 @@ def generate_signal(
     # Max Pain
     if max_pain and spot:
         mp_diff_pct = abs(spot - max_pain) / spot * 100
-        if mp_diff_pct < 0.5:
-            # Near max pain — market may pin here, avoid
-            score -= 10
-            rejects.append(f'Near max pain {max_pain:.0f} — pinning risk (-10)')
+        if mp_diff_pct < 0.3:
+            # Very near max pain — market may pin here, avoid
+            score -= 5
+            rejects.append(f'Near max pain {max_pain:.0f} — pinning risk (-5)')
         else:
             score += 5
             reasons.append(f'Away from max pain {max_pain:.0f} ✅ (+5)')
@@ -440,8 +446,8 @@ def generate_signal(
 
     # ── 10. Final Decision ─────────────────────────────────────────
     logger.info(
-        "VixGreeks | %s | %s | score=%.0f | min=%.0f | vix=%.1f | dte=%d | delta=%.3f",
-        symbol, direction, score, min_score, vix, dte, delta
+        "VixGreeks | %s | %s | score=%.0f | min=%.0f | vix=%.1f | dte=%d | delta=%.3f | reasons=%s | rejects=%s",
+        symbol, direction, score, min_score, vix, dte, delta, reasons, rejects
     )
 
     if score >= min_score:
