@@ -1175,7 +1175,7 @@ def _place_fyers_gtt(fyers, option_symbol: str, actual_qty: int, sl_price: float
     gtt_data = {
         "symbol": option_symbol,
         "side": -1,  # sell (exit)
-        "productType": "INTRADAY",
+        "productType": "MARGIN",
         "orderInfo": {
             "leg1": {
                 "price": round(tgt_price, 2),
