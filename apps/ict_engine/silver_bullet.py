@@ -442,26 +442,20 @@ class SilverBullet2MStrategy:
         entry_price = current_price
 
         # Step 6: Stop loss = sweep extreme + buffer
+        # Min SL distance: ATR based (at least 0.1% of price)
+        min_sl_dist = entry_price * 0.001
         if bias == "bullish":
             stop_loss = sweep["sweep_price"] - self.sl_buffer
             if stop_loss >= entry_price:
-                logger.warning(
-                    "[%s] SL invalid: %.2f >= entry %.2f",
-                    symbol,
-                    stop_loss,
-                    entry_price,
-                )
-                return None
+                # Sweep too close — use ATR-based SL
+                stop_loss = entry_price - max(min_sl_dist, self.sl_buffer)
+                logger.debug("[%s] SL adjusted (bullish) to %.2f", symbol, stop_loss)
         else:
             stop_loss = sweep["sweep_price"] + self.sl_buffer
             if stop_loss <= entry_price:
-                logger.warning(
-                    "[%s] SL invalid: %.2f <= entry %.2f",
-                    symbol,
-                    stop_loss,
-                    entry_price,
-                )
-                return None
+                # Sweep too close — use ATR-based SL
+                stop_loss = entry_price + max(min_sl_dist, self.sl_buffer)
+                logger.debug("[%s] SL adjusted (bearish) to %.2f", symbol, stop_loss)
 
         # Step 7: Targets (1:2 and 1:3 RR)
         risk_points = abs(entry_price - stop_loss)

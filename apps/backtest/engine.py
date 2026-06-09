@@ -697,6 +697,14 @@ class VixGreeksExpiryBuyerAlgo(BaseAlgo):
                 ltf = kwargs.get('ltf', [])
                 mtf = kwargs.get('mtf', [])
                 candles = ltf if ltf else mtf if mtf else []
+            # CandleBar objects → dict convert karo
+            def _to_dict(c):
+                if isinstance(c, dict):
+                    return c
+                return {'open': getattr(c,'open',0), 'high': getattr(c,'high',0),
+                        'low': getattr(c,'low',0), 'close': getattr(c,'close',0),
+                        'volume': getattr(c,'volume',0)}
+            candles = [_to_dict(c) for c in candles]
             from apps.options.nse_fetcher import fetch_nse_option_chain
             from apps.options.signal_engine import compute_pcr, find_oi_walls, compute_max_pain
             from apps.options.black_scholes import greeks_from_chain
