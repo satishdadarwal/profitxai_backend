@@ -835,6 +835,9 @@ def sync_fyers_tradebook(self):
                     continue
 
                 symbol = t.get("symbol", "")
+                # Spot equity skip — only options/futures sync
+                if not (symbol.endswith("CE") or symbol.endswith("PE") or "FUT" in symbol):
+                    continue
                 action = "buy" if t.get("side", 1) == 1 else "sell"
                 qty = int(t.get("tradedQty", 0))
                 price = Decimal(str(t.get("tradePrice", 0)))
