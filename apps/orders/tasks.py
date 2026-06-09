@@ -721,11 +721,14 @@ def sync_fyers_pnl(self):
                 defaults={
                     "realised_pnl": realized,
                     "unrealised_pnl": unrealized,
-                    "total_pnl": total,
                     "total_trades": overall.get("count_total", 0),
-                    "win_count": sum(
+                    "wins": sum(
                         1 for p in positions.get("netPositions", [])
                         if p.get("realized_profit", 0) > 0
+                    ),
+                    "losses": sum(
+                        1 for p in positions.get("netPositions", [])
+                        if p.get("realized_profit", 0) < 0
                     ),
                 }
             )
@@ -779,11 +782,11 @@ def sync_delta_pnl(self):
                 date=today,
                 mode="live",
                 defaults={
-                    "realized_pnl":   realized,
+                    "realised_pnl":   realized,
                     "unrealised_pnl": unrealized,
-                    "total_pnl":      realized + unrealized,
-                    "trade_count":    len(positions),
+                    "total_trades":   len(positions),
                     "wins":           sum(1 for p in positions if float(p.get("realized_pnl", 0)) > 0),
+                    "losses":         sum(1 for p in positions if float(p.get("realized_pnl", 0)) < 0),
                 }
             )
             logger.info("Delta P&L synced | user=%s | realized=%.2f", account.user.email, realized)
@@ -821,6 +824,8 @@ def sync_fyers_tradebook(self):
                 continue
 
             trades = tb.get("tradeBook", [])
+            from apps.orders.models import Order
+            from apps.market.models import Asset
             saved = 0
             for t in trades:
                 order_no = t.get("orderNumber", "")
