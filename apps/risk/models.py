@@ -40,7 +40,17 @@ class TradingProfile(models.Model):
 
     # Preferences
     require_stop_loss = models.BooleanField(default=True)
-    
+    exit_mode = models.CharField(
+        max_length=20,
+        default='gtt_oco',
+        choices=[
+            ('gtt_oco', 'GTT OCO — Fixed SL/Target'),
+            ('smart_trail', 'Smart Trail — Trailing SL'),
+            ('both', 'Both — Trail + GTT backup'),
+        ],
+        help_text="Exit order type for live options trades"
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

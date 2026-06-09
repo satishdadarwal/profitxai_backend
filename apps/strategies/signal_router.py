@@ -1148,16 +1148,35 @@ def _fyers_options_order(strategy, signal, fyers, account, qty: int, risk: dict,
                 except Exception as _qe:
                     logger.warning("Option LTP fetch failed for GTT | %s | using spot levels", _qe)
 
-                _place_fyers_gtt(
-                    fyers=fyers,
-                    option_symbol=option_symbol,
-                    actual_qty=actual_qty,
-                    sl_price=gtt_sl,
-                    tgt_price=gtt_tgt,
-                    option_type=option_type,
-                )
+                # ── exit_mode ke according order place karo ──────
+                _exit_user = effective_user or strategy.user
+                try:
+                    _exit_mode = _exit_user.trading_profile.exit_mode
+                except Exception:
+                    _exit_mode = 'gtt_oco'
+
+                if _exit_mode in ('gtt_oco', 'both'):
+                    _place_fyers_gtt(
+                        fyers=fyers,
+                        option_symbol=option_symbol,
+                        actual_qty=actual_qty,
+                        sl_price=gtt_sl,
+                        tgt_price=gtt_tgt,
+                        option_type=option_type,
+                    )
+
+                if _exit_mode in ('smart_trail', 'both') and _ltp > 0:
+                    _place_fyers_smart_trail(
+                        fyers=fyers,
+                        option_symbol=option_symbol,
+                        actual_qty=actual_qty,
+                        ltp=_ltp,
+                        sl_pct=_sl_pct,
+                        tgt_pct=_tp_pct,
+                    )
+
             except Exception as gtt_err:
-                logger.warning("GTT set failed (entry OK) | err=%s", gtt_err)
+                logger.warning("Exit order failed (entry OK) | err=%s", gtt_err)
         return order
     else:
         reject_reason = resp.get("message", "Unknown error")
@@ -1205,6 +1224,31 @@ def _place_fyers_gtt(fyers, option_symbol: str, actual_qty: int, sl_price: float
     resp = fyers.place_gtt_order(data=gtt_data)
     logger.info("GTT OCO placed | symbol=%s | sl=%.2f | tgt=%.2f | resp=%s", option_symbol, sl_price, tgt_price, resp)
     return resp
+
+
+def _place_fyers_smart_trail(fyers, option_symbol: str, actual_qty: int, ltp: float, sl_pct: float = 25.0, tgt_pct: float = 75.0):
+    """Fyers Smart Trail Order — trailing SL automatically adjust karta hai."""
+    try:
+        sl_price  = _round_to_tick(ltp * (1 - sl_pct / 100))
+        tgt_price = _round_to_tick(ltp * (1 + tgt_pct / 100))
+        jump_diff = max(0.5, round(ltp * 0.03, 1))
+        data = {
+            "symbol":      option_symbol,
+            "side":        -1,
+            "qty":         actual_qty,
+            "productType": "INTRADAY",
+            "orderType":   2,
+            "stopPrice":   sl_price,
+            "jump_diff":   jump_diff,
+            "target_price": tgt_price,
+        }
+        resp = fyers.create_smart_order_trail(data=data)
+        logger.info("Smart Trail placed | symbol=%s | ltp=%.2f | sl=%.2f | tgt=%.2f | jump=%.2f | resp=%s",
+                    option_symbol, ltp, sl_price, tgt_price, jump_diff, resp)
+        return resp
+    except Exception as e:
+        logger.warning("Smart Trail failed | %s", e)
+        return None
 
 def _fyers_futures_order(strategy, signal, fyers, account, qty: int, risk: dict, effective_user=None):
     """Fyers F&O futures order"""
