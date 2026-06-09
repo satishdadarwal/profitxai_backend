@@ -682,3 +682,105 @@ class MTFTrendAlgo(BaseAlgo):
 from apps.backtest.algos.multi_confirm_options import MultiConfirmOptionsAlgo
 register("multi_confirm_options", MultiConfirmOptionsAlgo)
 
+
+# ── VIX Greeks Expiry Buyer ──────────────────────────────────────────────────
+class VixGreeksExpiryBuyerAlgo(BaseAlgo):
+    """
+    Wrapper for VIX + Greeks + ICT based expiry buyer strategy.
+    Runs 1 PM - 3 PM IST, DTE <= 3, VIX < 18.
+    """
+    def generate_signal(self, symbol: str, candles: list, price: float, **kwargs) -> AlgoSignal:
+        try:
+            from apps.backtest.algos.vix_greeks_expiry_buyer import generate_signal as _gen
+            from apps.options.nse_fetcher import fetch_nse_option_chain
+            from apps.options.signal_engine import compute_pcr, find_oi_walls, compute_max_pain
+            from apps.options.black_scholes import greeks_from_chain
+            from apps.backtest.algos.nse_option_seller import _days_to_expiry
+
+            # Candles split
+            candles_5m  = candles[-100:] if len(candles) > 100 else candles
+            candles_15m = candles[-50:]  if len(candles) > 50  else candles
+
+            # VIX fetch
+            try:
+                import yfinance as yf
+                vix_data = yf.Ticker("^INDIAVIX").fast_info
+                vix = float(vix_data.get("lastPrice", 14.0) or 14.0)
+            except Exception:
+                vix = float(self.get_param("vix_fallback", 14.0))
+
+            # Option chain
+            chain_data = []
+            pcr = 1.0
+            max_pain = price
+            call_wall = 0.0
+            put_wall = 0.0
+            ce_delta = 0.45
+            pe_delta = -0.45
+            theta = -5.0
+            gamma = 0.003
+            iv_rank = None
+
+            try:
+                chain = fetch_nse_option_chain(symbol=symbol, expiry_ts="", user=None)
+                if chain:
+                    chain_data = chain.get("data", [])
+                    pcr_data = compute_pcr(chain_data)
+                    pcr = pcr_data.get("pcr_oi", 1.0)
+                    walls = find_oi_walls(chain_data)
+                    call_wall = walls.get("call_wall", 0)
+                    put_wall  = walls.get("put_wall", 0)
+                    max_pain  = compute_max_pain(chain_data) or price
+
+                    # ATM greeks
+                    atm_strike = int(round(price / 50) * 50)
+                    expiry_str = chain.get("expiry", "")
+                    if expiry_str:
+                        g = greeks_from_chain(price, atm_strike, expiry_str)
+                        ce_delta = g.get("ce_delta", 0.45)
+                        pe_delta = g.get("pe_delta", -0.45)
+                        theta    = g.get("theta", -5.0)
+                        gamma    = g.get("gamma", 0.003)
+            except Exception as e:
+                logger.warning("Chain fetch failed for VixGreeks | %s", e)
+
+            # DTE
+            dte = _days_to_expiry(symbol)
+
+            result = _gen(
+                symbol=symbol, spot=price,
+                candles_5m=candles_5m, candles_15m=candles_15m,
+                vix=vix, dte=dte, pcr=pcr,
+                max_pain=max_pain, call_wall=call_wall, put_wall=put_wall,
+                ce_delta=ce_delta, pe_delta=pe_delta,
+                theta=theta, gamma=gamma, iv_rank=iv_rank,
+                parameters=self.parameters,
+            )
+
+            if result.signal in ('buy_ce', 'buy_pe'):
+                sig_type = 'buy' if result.signal == 'buy_ce' else 'sell'
+                return AlgoSignal(
+                    signal_type=sig_type,
+                    symbol=symbol,
+                    price=price,
+                    confidence=result.score,
+                    reason=f"VixGreeks {result.option_type} | score={result.score} | vix={result.vix} | dte={result.dte}",
+                    metadata={
+                        "option_type": result.option_type,
+                        "delta": result.delta,
+                        "theta": result.theta,
+                        "gamma": result.gamma,
+                        "vix": result.vix,
+                        "dte": result.dte,
+                        "sl_pct": result.sl_pct,
+                        "tp_pct": result.tp_pct,
+                        "reasons": result.reasons,
+                    }
+                )
+        except Exception as e:
+            logger.error("VixGreeksExpiryBuyerAlgo error | %s", e)
+
+        return AlgoSignal(signal_type="hold", symbol=symbol, price=price,
+                         reason="VixGreeks: no signal")
+
+register("vix_greeks_expiry_buyer", VixGreeksExpiryBuyerAlgo)
