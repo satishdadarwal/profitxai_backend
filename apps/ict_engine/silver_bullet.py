@@ -964,9 +964,11 @@ def execute_silver_bullet_cycle(strategy, symbol: str) -> dict:
             from apps.orders.models import Order as _Order
             from django.utils import timezone
             today = timezone.now().date()
+            _check_mode = getattr(strategy, 'mode', 'paper')
             already_open = _Order.objects.filter(
                 strategy_id=strategy.id,
                 status__in=["open", "pending", "filled"],
+                mode=_check_mode,
                 created_at__date=today,
             ).exists()
 

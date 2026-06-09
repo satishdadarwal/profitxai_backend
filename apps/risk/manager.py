@@ -961,7 +961,7 @@ class RiskManager:
 
     def _get_open_position_count(self) -> int:
         from apps.orders.models import Order
-        return Order.objects.filter(user=self.user, status="filled").count()
+        return Order.objects.filter(user=self.user, status="filled", mode="live").count()
 
     def _check_drawdown_limit(self) -> bool:
         from apps.wallet.models import Wallet

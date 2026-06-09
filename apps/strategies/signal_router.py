@@ -682,15 +682,33 @@ def _place_fyers_order(strategy, signal, instrument_type: str, user=None, accoun
         _tp = getattr(signal, 'tp_price', None) or getattr(signal, 'take_profit', None) or _meta.get('take_profit') or _meta.get('take_profit_1')
         _sig_type = str(getattr(signal, 'signal_type', 'buy')).lower()
         _side = 'buy' if _sig_type in ('buy', 'long') else 'sell'
-        # Options mein risk check ke liye premium use karo, spot price nahi
+        # Options mein risk check ke liye actual NSE premium use karo
         _instr = getattr(strategy, 'instrument_type', 'equity')
         _raw_price = Decimal(str(signal.price))
-        _check_price = round(_raw_price * Decimal("0.03"), 2) if _instr == 'options' else _raw_price
+        if _instr == 'options':
+            try:
+                from .fyers_utils import get_best_premium_option
+                _sig_upper = str(signal.symbol).upper()
+                _opt_type = 'PE' if 'PE' in _sig_upper else 'CE'
+                _base = str(signal.symbol).split(':')[-1]
+                _base = ''.join(c for c in _base if c.isalpha())[:10]
+                _best = get_best_premium_option(_base, float(_raw_price), _opt_type)
+                _prem = float(_best.get('ltp', 0) or _best.get('premium', 0)) if _best else 0
+                _check_price = Decimal(str(_prem)) if _prem > 5 else round(_raw_price * Decimal("0.005"), 2)
+                logger.info("Risk check premium | %s %s | ltp=%.1f", _base, _opt_type, float(_check_price))
+            except Exception as _pe:
+                logger.warning("Premium fetch failed for risk check | %s", _pe)
+                _check_price = round(_raw_price * Decimal("0.005"), 2)
+        else:
+            _check_price = _raw_price
+        # Options ke liye sl=None pass karo — premium based loss check hoga
+        _risk_sl = None if _instr == 'options' else (Decimal(str(_sl)) if _sl else None)
+        logger.info("Risk check call | qty=1 | price=%.2f | sl=%s | instr=%s", float(_check_price), _risk_sl, _instr)
         allowed, reason = rm.can_place_order(
             symbol=signal.symbol,
             qty=1,
             price=_check_price,
-            stop_loss=Decimal(str(_sl)) if _sl else None,
+            stop_loss=_risk_sl,
             take_profit=Decimal(str(_tp)) if _tp else None,
             side=_side,
         )
@@ -1070,8 +1088,9 @@ def _fyers_options_order(strategy, signal, fyers, account, qty: int, risk: dict,
 
     if resp.get("s") == "ok":
         exchange_order_id = resp.get("id")
+        _real_strat = getattr(strategy, '_real', strategy)
         order = create_order(
-            strategy=strategy,
+            strategy=_real_strat,
             symbol=option_symbol,
             side="buy",
             quantity=actual_qty,
@@ -1100,12 +1119,15 @@ def _fyers_options_order(strategy, signal, fyers, account, qty: int, risk: dict,
                     if _ltp > 0:
                         _sl_pct = float(risk.get("sl_pct", 25.0))
                         _tp_pct = float(risk.get("target_pct", 75.0))
-                        if option_type == "PE":
-                            gtt_sl  = round(_ltp * (1 + _sl_pct / 100), 2)  # PE seller exit upar
-                            gtt_tgt = round(_ltp * (1 - _tp_pct / 100), 2)  # PE profit neeche
+                        _trader_type = risk.get('trader_type', 'buyer')
+                        if _trader_type == 'seller':
+                            # Seller: SL upar, TGT neeche (premium perspective)
+                            gtt_sl  = round(_ltp * (1 + _sl_pct / 100), 2)
+                            gtt_tgt = round(_ltp * (1 - _tp_pct / 100), 2)
                         else:
-                            gtt_sl  = round(_ltp * (1 - _sl_pct / 100), 2)  # CE SL neeche
-                            gtt_tgt = round(_ltp * (1 + _tp_pct / 100), 2)  # CE TP upar
+                            # Buyer (default): SL neeche, TGT upar
+                            gtt_sl  = round(_ltp * (1 - _sl_pct / 100), 2)
+                            gtt_tgt = round(_ltp * (1 + _tp_pct / 100), 2)
                         logger.info(
                             "GTT option levels | LTP=%.2f | SL=%.2f | TGT=%.2f | type=%s",
                             _ltp, gtt_sl, gtt_tgt, option_type
@@ -1141,13 +1163,19 @@ def _fyers_options_order(strategy, signal, fyers, account, qty: int, risk: dict,
 
 
 
+def _round_to_tick(price: float, tick: float = 0.05) -> float:
+    """Price ko tick size ke nearest multiple mein round karo."""
+    return round(round(price / tick) * tick, 2)
+
 def _place_fyers_gtt(fyers, option_symbol: str, actual_qty: int, sl_price: float, tgt_price: float, option_type: str):
     """Entry ke baad Fyers GTT OCO order place karo — SL + Target dono."""
+    sl_price  = _round_to_tick(sl_price)
+    tgt_price = _round_to_tick(tgt_price)
     # OCO: leg1 = target (above LTP), leg2 = SL (below LTP)
     gtt_data = {
         "symbol": option_symbol,
         "side": -1,  # sell (exit)
-        "productType": "MARGIN",
+        "productType": "INTRADAY",
         "orderInfo": {
             "leg1": {
                 "price": round(tgt_price, 2),
@@ -1207,7 +1235,7 @@ def _fyers_futures_order(strategy, signal, fyers, account, qty: int, risk: dict,
         "qty": actual_qty,
         "type": 2,  # Market
         "side": side,
-        "productType": "MARGIN",  # Fyers F&O futures ke liye MARGIN chahiye, INTRADAY nahi
+        "productType": "INTRADAY",  # Fyers F&O futures ke liye MARGIN chahiye, INTRADAY nahi
         "limitPrice": 0,
         "stopPrice": 0,
         "validity": "DAY",
