@@ -1009,6 +1009,19 @@ def _fyers_options_order(strategy, signal, fyers, account, qty: int, risk: dict,
         logger.error("Option symbol nahi mila | symbol=%s | price=%s", symbol, current_price)
         return None
 
+    # ── Fyers pe already open position check karo ────────────────
+    try:
+        _pos_resp = fyers.positions()
+        for _p in _pos_resp.get("netPositions", []):
+            if _p.get("symbol") == option_symbol and int(_p.get("netQty", 0)) != 0:
+                logger.info(
+                    "Fyers position already open | symbol=%s | qty=%s — skipping duplicate",
+                    option_symbol, _p.get("netQty")
+                )
+                return None
+    except Exception as _pe:
+        logger.warning("Fyers position check failed | %s", _pe)
+
     # ── FIX: qty = lots (Flutter se / capital-based), actual_qty = lots × lot_size ──
     base = _clean_symbol(symbol)
     lot_size = LOT_SIZES.get(base, 1)
