@@ -272,6 +272,7 @@ def generate_signal(
         )
 
     # ── Expiry Day Check (Post Sep 2025 SEBI rules) ───────────────
+    weekday = now_ist.weekday()  # 0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri
     # NSE: NIFTY weekly=Tuesday(1), BANKNIFTY/FINNIFTY monthly only (DTE<=2)
     # BSE: SENSEX weekly=Thursday(3)
     _sym = symbol.upper()
