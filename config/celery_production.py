@@ -250,7 +250,18 @@ beat_schedule = {
         "options": {
             "queue": "strategies",
             "priority": 7,
-            "expires": 55,   # ✅ 60s cycle ke andar execute na hua toh drop karo
+            "expires": 55,
+        },
+    },
+    # ── VIX Greeks Expiry Buyer — Fast 90s cycle ─────────────────
+    "run-vix-greeks-expiry": {
+        "task": "strategies.run_all_active_strategies",
+        "schedule": 90.0,
+        "args": ["vix_greeks_expiry_buyer"],
+        "options": {
+            "queue": "strategies",
+            "priority": 9,
+            "expires": 85,
         },
     },
 

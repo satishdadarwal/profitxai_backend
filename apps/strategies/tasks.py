@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
     soft_time_limit=300,
     time_limit=360,
 )
-def run_all_active_strategies():
+def run_all_active_strategies(algo_filter: str = None):
     from apps.strategies.models import Strategy
 
     import datetime, pytz
@@ -27,13 +27,16 @@ def run_all_active_strategies():
     now_ist = datetime.datetime.now(ist).time()
     in_market_hours = datetime.time(9, 15) <= now_ist <= datetime.time(15, 35)
     if in_market_hours:
-        for s in Strategy.objects.filter(is_active=True, state=Strategy.State.IDLE):
+        _idle_qs = Strategy.objects.filter(is_active=True, state=Strategy.State.IDLE)
+        if algo_filter: _idle_qs = _idle_qs.filter(algo_name=algo_filter)
+        for s in _idle_qs:
             logger.warning('Auto-recovering idle strategy | id=%s | name=%s', s.id, s.name)
             s.state = Strategy.State.RUNNING
             s.save(update_fields=['state', 'updated_at'])
-    active_strategies = Strategy.objects.filter(
-        state=Strategy.State.RUNNING
-    ).values_list('id', flat=True)
+    _active_qs = Strategy.objects.filter(state=Strategy.State.RUNNING)
+    if algo_filter:
+        _active_qs = _active_qs.filter(algo_name=algo_filter)
+    active_strategies = _active_qs.values_list('id', flat=True)
 
     if not active_strategies:
         logger.info("No active strategies to run")
