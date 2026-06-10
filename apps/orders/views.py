@@ -345,9 +345,6 @@ from reportlab.graphics.shapes import Drawing
 from reportlab.graphics.charts.lineplots import LinePlot
 from reportlab.lib.units import inch
 
-from .models import Trade
-from apps.options.models import OptionTrade
-
 
 class ExportTradesCSVView(APIView):
     """
@@ -373,13 +370,13 @@ class ExportTradesCSVView(APIView):
         if market_type != 'all':
             trades = trades.filter(market_type=market_type)
         
-        # Query option trades
-        option_trades = OptionTrade.objects.filter(user=user)
+        # Query option orders from Order model (single source of truth)
+        option_orders = Order.objects.filter(user=user, instrument_type='options').select_related('asset')
         if start_date:
-            option_trades = option_trades.filter(entry_time__date__gte=start_date)
+            option_orders = option_orders.filter(created_at__date__gte=start_date)
         if end_date:
-            option_trades = option_trades.filter(entry_time__date__lte=end_date)
-        
+            option_orders = option_orders.filter(created_at__date__lte=end_date)
+
         # Create CSV
         output = io.StringIO()
         writer = csv.writer(output)
@@ -419,32 +416,34 @@ class ExportTradesCSVView(APIView):
                 'FILLED',
             ])
         
-        # Write option trades (only if market_type is 'all' or 'indian')
+        # Write option orders (only if market_type is 'all' or 'indian')
         if market_type in ['all', 'indian']:
-            for trade in option_trades.order_by('entry_time'):
-                tags_str = ', '.join(trade.tags) if trade.tags else ''
-                
+            for ord_ in option_orders.order_by('entry_time'):
+                tags_str = ', '.join(ord_.tags) if ord_.tags else ''
+                pnl_val = float(ord_.realized_pnl or 0)
+                sym_str = ord_.symbol_display or (ord_.asset.symbol if ord_.asset else '')
+                ts = (ord_.entry_time or ord_.created_at)
                 writer.writerow([
-                    trade.entry_time.strftime('%Y-%m-%d %H:%M:%S'),
+                    ts.strftime('%Y-%m-%d %H:%M:%S') if ts else '',
                     'Indian Market',
-                    f"{trade.symbol.name} {trade.contract.strike}{trade.contract.option_type}",
-                    trade.action.upper(),
+                    sym_str,
+                    ord_.side.upper(),
                     'OPTION',
-                    trade.quantity,
-                    trade.entry_price,
-                    trade.exit_price or '',
-                    trade.pnl or 0,
-                    0,  # Fee not tracked separately
-                    trade.pnl or 0,
-                    trade.mode.upper(),
-                    trade.contract.strike,
-                    trade.contract.option_type,
-                    trade.lots,
-                    '',  # No leverage for options
-                    trade.notes,
+                    float(ord_.quantity),
+                    float(ord_.entry_price or ord_.limit_price or 0),
+                    float(ord_.exit_price or 0) or '',
+                    pnl_val,
+                    0,
+                    pnl_val,
+                    ord_.mode.upper(),
+                    '',  # strike parsed from symbol_display if needed
+                    ord_.option_type or '',
+                    ord_.lots or '',
+                    '',
+                    ord_.notes,
                     tags_str,
-                    trade.emoji_reaction,
-                    trade.status.upper(),
+                    ord_.emoji_reaction,
+                    ord_.status.upper(),
                 ])
         
         # Prepare response
@@ -482,17 +481,18 @@ class ExportTradesPDFView(APIView):
         
         trades = trades.order_by('created_at')
         
-        # Query option trades
-        option_trades = OptionTrade.objects.filter(user=user, status='closed')
+        # Query closed option orders from Order model
+        option_orders_pdf = Order.objects.filter(
+            user=user, instrument_type='options', status__in=['filled', 'cancelled'],
+        ).select_related('asset')
         if start_date:
-            option_trades = option_trades.filter(entry_time__date__gte=start_date)
+            option_orders_pdf = option_orders_pdf.filter(created_at__date__gte=start_date)
         if end_date:
-            option_trades = option_trades.filter(entry_time__date__lte=end_date)
-        
-        option_trades = option_trades.order_by('entry_time')
-        
+            option_orders_pdf = option_orders_pdf.filter(created_at__date__lte=end_date)
+        option_orders_pdf = list(option_orders_pdf.order_by('entry_time'))
+
         # Calculate statistics
-        stats = self._calculate_statistics(trades, option_trades, market_type)
+        stats = self._calculate_statistics(trades, option_orders_pdf, market_type)
         
         # Create PDF
         buffer = io.BytesIO()
@@ -569,11 +569,12 @@ class ExportTradesPDFView(APIView):
                 pnl = float(trade.realized_pnl) - float(trade.fee or 0)
                 all_pnls.append(pnl)
         
-        # Process option trades
+        # Process option orders (Order model uses realized_pnl)
         if market_type in ['all', 'indian']:
             for trade in option_trades:
-                if trade.pnl is not None:
-                    all_pnls.append(float(trade.pnl))
+                pnl = getattr(trade, 'pnl', None) or getattr(trade, 'realized_pnl', None)
+                if pnl is not None:
+                    all_pnls.append(float(pnl))
         
         if not all_pnls:
             return self._empty_stats()
@@ -716,29 +717,25 @@ def calculate_risk_reward(request):
         return Response({'error': 'Invalid market_type'}, status=400)
 
 
-from rest_framework import generics
-from .models import Trade
-from .serializers import TradeSerializer
-
 class TradeJournalListView(APIView):
     """
     GET /api/v1/orders/journal/?page=1&market_type=indian&mode=live&tags=fvg
-    Order model (live) + Trade model (paper) merge karke return karo
+    Order model is single source of truth — use ?mode=paper|live|all
     """
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
         from django.core.paginator import Paginator
         market_type = request.query_params.get("market_type", "all")
-        mode_filter = request.query_params.get("mode", "live")
+        mode_filter = request.query_params.get("mode", "all")
         tags_filter = request.query_params.get("tags", "")
         page_num    = int(request.query_params.get("page", 1))
         results = []
 
-        # 1. Order model — live Fyers/Delta trades
+        # Order model — single source of truth for paper and live
         order_qs = Order.objects.filter(
-            user=request.user, mode="live",
-        ).exclude(side=None).exclude(exchange_order_id="").exclude(exchange_order_id=None).exclude(notes__startswith="strategy=").select_related("asset").order_by("-created_at")
+            user=request.user,
+        ).exclude(side=None).select_related("asset").order_by("-created_at")
         if mode_filter != "all":
             order_qs = order_qs.filter(mode=mode_filter)
         if market_type == "indian":
@@ -786,38 +783,6 @@ class TradeJournalListView(APIView):
                 "created_at": o.created_at.isoformat(),
             })
 
-        # 2. Trade model — paper trades
-        trade_qs = Trade.objects.filter(user=request.user).order_by("-created_at")
-        if mode_filter != "all":
-            trade_qs = trade_qs.filter(mode=mode_filter)
-        if market_type != "all":
-            trade_qs = trade_qs.filter(market_type=market_type)
-        if tags_filter:
-            for tag in [t.strip() for t in tags_filter.split(",") if t.strip()]:
-                trade_qs = trade_qs.filter(tags__icontains=tag)
-        for t in trade_qs:
-            side = t.side or "buy"
-            if side == "long": side = "buy"
-            elif side == "short": side = "sell"
-            pnl = float(t.realized_pnl) if t.realized_pnl is not None else None
-            fee = float(t.fee or 0)
-            results.append({
-                "id": str(t.id), "order_id": str(t.order_id) if t.order_id else None,
-                "symbol": t.asset.symbol if t.asset else "", "asset_name": t.asset.symbol if t.asset else "",
-                "market_type": t.market_type or "indian",
-                "market_display": "Indian Market" if t.market_type == "indian" else "Crypto Market",
-                "side": side, "mode": t.mode or "paper",
-                "quantity": float(t.quantity or 0), "price": float(t.price or 0),
-                "amount": float(t.amount or 0), "fee": fee,
-                "realized_pnl": pnl, "net_pnl": (pnl - fee) if pnl is not None else None,
-                "notes": t.notes or "", "tags": t.tags or [],
-                "emoji_reaction": t.emoji_reaction or "",
-                "strike": float(t.strike) if t.strike else None,
-                "lots": t.lots, "option_type": t.option_type or "",
-                "leverage": float(t.leverage) if t.leverage else None,
-                "funding_fee": float(t.funding_fee) if t.funding_fee else None,
-                "created_at": t.created_at.isoformat(),
-            })
 
         # Buy+Sell match karke net_pnl calculate karo
         from collections import defaultdict

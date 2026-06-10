@@ -20,14 +20,12 @@ from rest_framework.generics import ListAPIView
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from apps.orders.models import Trade
 from django.db.models import Sum
 
 from apps.subscriptions.permissions import CanAddStrategy, CanLiveTrade
 
-# ✅ Model imports
-from apps.paper_trading.models import PaperTrade
-from apps.options.models import OptionTrade
+# ✅ Model imports — Order is single source of truth
+from apps.orders.models import Order as _OrderModel
 
 from .models import Strategy, StrategyPerformanceSnapshot, StrategySignal
 from .serializers import (
@@ -752,67 +750,15 @@ class StrategyActivityLogView(APIView):
             if mode_filter and effective_mode != mode_filter:
                 continue
 
-            if effective_mode == "paper":
-                # ✅ FIX: account__user se user filter karo
-                # PaperTrade mein direct user FK nahi — account→user chain se
-                paper_qs = PaperTrade.objects.filter(
-                    strategy_id=str(strategy.id),
-                    account__user=request.user,   # ✅ user ka hi trade
-                )
-                if today_start:
-                    paper_qs = paper_qs.filter(opened_at__gte=today_start)
-                paper_qs = paper_qs.order_by("-opened_at")
-
-                option_qs = OptionTrade.objects.filter(
-                    user=request.user,
-                    mode="paper",
-                    strategy_id=str(strategy.id),
-                )
-                if today_start:
-                    option_qs = option_qs.filter(entry_time__gte=today_start)
-                option_qs = option_qs.order_by("-entry_time")
-
-                all_trades = list(paper_qs) + list(option_qs)
-
-            else:
-                # ── LIVE MODE: sirf live Orders ke Trade records ──────────
-                try:
-                    live_qs = Trade.objects.filter(
-                        user=request.user,
-                        order__strategy_id=strategy.id,
-                        order__mode="live",
-                    ).select_related("order", "asset")
-
-                    if today_start:
-                        live_qs = live_qs.filter(created_at__gte=today_start)
-
-                    live_qs = live_qs.order_by("-created_at")
-                    live_trades = list(live_qs)
-                except Exception as e:
-                    logger.warning(
-                        "Error fetching live trades for strategy %s: %s",
-                        strategy.id, e,
-                    )
-                    live_trades = []
-
-                # ── Live OptionTrades bhi include karo ────────────────────
-                # ✅ FIX: sirf mode='live' wale — paper option trades exclude
-                try:
-                    live_opt_qs = OptionTrade.objects.filter(
-                        user=request.user,
-                        mode="live",
-                        strategy_id=str(strategy.id),
-                    )
-                    if today_start:
-                        live_opt_qs = live_opt_qs.filter(
-                            entry_time__gte=today_start
-                        )
-                    live_opt_qs = live_opt_qs.order_by("-entry_time")
-                    live_option_trades = list(live_opt_qs)
-                except Exception:
-                    live_option_trades = []
-
-                all_trades = live_trades + live_option_trades
+            # Order model is single source of truth — paper and live both
+            order_qs = _OrderModel.objects.filter(
+                strategy_id=strategy.id,
+                user=request.user,
+                mode=effective_mode,
+            ).select_related("asset")
+            if today_start:
+                order_qs = order_qs.filter(created_at__gte=today_start)
+            all_trades = list(order_qs.order_by("-created_at"))
 
             all_trades.sort(
                 key=lambda t: (
