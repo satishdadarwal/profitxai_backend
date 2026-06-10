@@ -278,6 +278,23 @@ class ConfluenceOptionsAlgo:
                         return None
                 except Exception:
                     ce_delta = ce_theta = ce_gamma = None
+                # ICT Premium/Discount Zone — CE entry must be in discount zone
+                try:
+                    _recent = candles_5m[-100:] if len(candles_5m) >= 100 else candles_5m
+                    _ph = max(float(c["high"] if isinstance(c, dict) else c.high) for c in _recent)
+                    _pl = min(float(c["low"] if isinstance(c, dict) else c.low) for c in _recent)
+                    _range = _ph - _pl
+                    if _range > 0:
+                        _eq = _pl + (_range * 0.5)
+                        if spot > _eq:
+                            logger.debug(
+                                "ConfluenceOptions CE: spot %.2f in PREMIUM zone (eq=%.2f), skip",
+                                spot, _eq
+                            )
+                            return None
+                        logger.debug("ConfluenceOptions CE: PD Zone ✅ DISCOUNT (spot=%.2f eq=%.2f)", spot, _eq)
+                except Exception:
+                    pass
                 logger.info(
                     "✅ ConfluenceOptions BUY CE | %s | spot=%.2f | strike=%d | "
                     "combined=%.1f | SB=%.1f | MC=%.1f | RSI=%.1f | DTE=%d",
@@ -325,6 +342,23 @@ class ConfluenceOptionsAlgo:
                         return None
                 except Exception:
                     pe_delta = pe_theta = pe_gamma = None
+                # ICT Premium/Discount Zone — PE entry must be in premium zone
+                try:
+                    _recent = candles_5m[-100:] if len(candles_5m) >= 100 else candles_5m
+                    _ph = max(float(c["high"] if isinstance(c, dict) else c.high) for c in _recent)
+                    _pl = min(float(c["low"] if isinstance(c, dict) else c.low) for c in _recent)
+                    _range = _ph - _pl
+                    if _range > 0:
+                        _eq = _pl + (_range * 0.5)
+                        if spot < _eq:
+                            logger.debug(
+                                "ConfluenceOptions PE: spot %.2f in DISCOUNT zone (eq=%.2f), skip",
+                                spot, _eq
+                            )
+                            return None
+                        logger.debug("ConfluenceOptions PE: PD Zone ✅ PREMIUM (spot=%.2f eq=%.2f)", spot, _eq)
+                except Exception:
+                    pass
                 logger.info(
                     "✅ ConfluenceOptions BUY PE | %s | spot=%.2f | strike=%d | "
                     "combined=%.1f | SB=%.1f | MC=%.1f | RSI=%.1f | DTE=%d",

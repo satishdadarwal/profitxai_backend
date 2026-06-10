@@ -453,6 +453,36 @@ class SilverBullet2MStrategy:
         current_price = float(df_2m["close"].iloc[-1])
         entry_price = current_price
 
+        # Step 5b: ICT Premium/Discount Zone filter
+        # Bullish → price must be in discount zone (below equilibrium)
+        # Bearish → price must be in premium zone (above equilibrium)
+        try:
+            _lookback = min(100, len(df_2m))
+            _ph = float(df_2m['high'].iloc[-_lookback:].max())
+            _pl = float(df_2m['low'].iloc[-_lookback:].min())
+            _range = _ph - _pl
+            if _range > 0:
+                _eq = _pl + (_range * 0.5)
+                if bias == 'bullish' and entry_price > _eq:
+                    logger.info(
+                        "[%s] Silver Bullet: price %.2f in PREMIUM zone (eq=%.2f), skip LONG",
+                        symbol, entry_price, _eq
+                    )
+                    return None
+                elif bias == 'bearish' and entry_price < _eq:
+                    logger.info(
+                        "[%s] Silver Bullet: price %.2f in DISCOUNT zone (eq=%.2f), skip SHORT",
+                        symbol, entry_price, _eq
+                    )
+                    return None
+                logger.info(
+                    "[%s] PD Zone ✅ | price=%.2f eq=%.2f | %s",
+                    symbol, entry_price, _eq,
+                    'DISCOUNT' if bias == 'bullish' else 'PREMIUM'
+                )
+        except Exception as e:
+            logger.debug("[%s] PD Zone check skipped: %s", symbol, e)
+
         # Step 6: Stop loss = sweep extreme + buffer
         # Min SL distance: ATR based (at least 0.1% of price)
         min_sl_dist = entry_price * 0.001
@@ -527,6 +557,17 @@ class SilverBullet2MStrategy:
             score += 15
         if sweep.get("rejection", 0) > risk_points * 0.5:
             score += 5
+
+        # OTE bonus (+5 score)
+        try:
+            if _range > 0:
+                _ote_low = _ph - (_range * 0.79)
+                _ote_high = _ph - (_range * 0.62)
+                if _ote_low <= entry_price <= _ote_high:
+                    score += 5
+                    tags.append('OTE')
+        except Exception:
+            pass
 
         score = min(round(score, 1), 100.0)
 

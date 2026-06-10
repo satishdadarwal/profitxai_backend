@@ -363,6 +363,47 @@ def generate_signal(
 
     option_type = 'CE' if direction == 'bullish' else 'PE'
 
+    # ── 5b. ICT Premium/Discount Zone Filter ──────────────────────
+    # CE (bullish) → spot must be in discount zone (below equilibrium)
+    # PE (bearish) → spot must be in premium zone (above equilibrium)
+    try:
+        _recent_vg = candles_5m[-100:] if len(candles_5m) >= 100 else candles_5m
+        _ph_vg = max(c.get('high', 0) for c in _recent_vg)
+        _pl_vg = min(c.get('low', float('inf')) for c in _recent_vg)
+        _range_vg = _ph_vg - _pl_vg
+        if _range_vg > 0:
+            _eq_vg = _pl_vg + (_range_vg * 0.5)
+            if option_type == 'CE' and spot > _eq_vg:
+                logger.info(
+                    "VixGreeks CE: spot %.2f in PREMIUM zone (eq=%.2f), skip LONG",
+                    spot, _eq_vg
+                )
+                return VixGreeksSignal(
+                    signal='hold', score=score, option_type=option_type, symbol=symbol,
+                    spot=spot, vix=vix, dte=dte, delta=0, theta=theta,
+                    gamma=gamma, sl_pct=SL_PCT, tp_pct=TP_PCT, rr=3.0,
+                    reasons=reasons,
+                    reject_reasons=rejects + [f'PD Zone: spot {spot:.2f} in PREMIUM (eq={_eq_vg:.2f}), need DISCOUNT for CE']
+                )
+            elif option_type == 'PE' and spot < _eq_vg:
+                logger.info(
+                    "VixGreeks PE: spot %.2f in DISCOUNT zone (eq=%.2f), skip SHORT",
+                    spot, _eq_vg
+                )
+                return VixGreeksSignal(
+                    signal='hold', score=score, option_type=option_type, symbol=symbol,
+                    spot=spot, vix=vix, dte=dte, delta=0, theta=theta,
+                    gamma=gamma, sl_pct=SL_PCT, tp_pct=TP_PCT, rr=3.0,
+                    reasons=reasons,
+                    reject_reasons=rejects + [f'PD Zone: spot {spot:.2f} in DISCOUNT (eq={_eq_vg:.2f}), need PREMIUM for PE']
+                )
+            logger.info(
+                "VixGreeks PD Zone ✅ | spot=%.2f eq=%.2f | %s",
+                spot, _eq_vg, 'DISCOUNT' if option_type == 'CE' else 'PREMIUM'
+            )
+    except Exception as _pd_e:
+        logger.debug("VixGreeks PD Zone check skipped: %s", _pd_e)
+
     # ── 6. Greeks Filter ───────────────────────────────────────────
     delta = ce_delta if option_type == 'CE' else abs(pe_delta)
 
