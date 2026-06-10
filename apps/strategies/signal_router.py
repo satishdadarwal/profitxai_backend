@@ -1400,7 +1400,8 @@ def _fyers_equity_order(strategy, signal, fyers, account, qty: int, risk: dict, 
         )
 
         if delta_resp.get("success"):
-            exchange_order_id = str(delta_resp.get("result", {}).get("id", ""))
+            bracket = delta_resp.get("bracket_ids", {})
+            exchange_order_id = bracket.get("main") or str(delta_resp.get("result", {}).get("id", ""))
             # ✅ FIX: Proxy object nahi chalega — real Strategy instance chahiye
             _real_strategy = getattr(strategy, '_real', strategy)
             order = create_order(
@@ -1416,12 +1417,15 @@ def _fyers_equity_order(strategy, signal, fyers, account, qty: int, risk: dict, 
                 exchange_order_id=exchange_order_id,
                 mode="live",  # FIX: broker fn = always live
             )
+            if order and bracket:
+                try:
+                    order.broker_response = bracket
+                    order.save(update_fields=["broker_response"])
+                except Exception:
+                    pass
             logger.info(
-                "Delta order placed | symbol=%s | side=%s | qty=%d | price=%s",
-                symbol,
-                side,
-                qty,
-                current_price,
+                "Delta order placed | symbol=%s | side=%s | qty=%d | bracket=%s",
+                symbol, side, qty, bracket,
             )
             return order
         else:
@@ -1432,6 +1436,104 @@ def _fyers_equity_order(strategy, signal, fyers, account, qty: int, risk: dict, 
     except Exception as exc:
         logger.exception("Delta order exception | %s", exc)
         return None
+
+def _place_delta_order(strategy, signal, instrument_type: str, user=None, account=None):
+    """
+    Delta Exchange pe live order place karo.
+    Called via BROKER_ORDER_FUNCTIONS registry with signature:
+      fn(proxy, signal, instrument_type, user=user, account=account)
+    """
+    from apps.orders.services import create_order
+
+    effective_user = user or getattr(strategy, 'user', None)
+    if account is None:
+        from apps.brokers.models import BrokerAccount
+        account = BrokerAccount.objects.filter(
+            user=effective_user, broker="delta", is_active=True, is_verified=True,
+        ).first()
+    if not account:
+        logger.error("Delta broker account not connected | user=%s", getattr(effective_user, 'pk', None))
+        return None
+
+    symbol = signal.symbol
+    signal_type = signal.signal_type
+    current_price = float(signal.price)
+    meta = getattr(signal, "metadata", {}) or {}
+
+    # ATR-based SL/TP
+    atr_val = float(meta.get("atr", 0))
+    if atr_val <= 0:
+        atr_val = current_price * 0.005
+    risk = getattr(strategy, 'risk_config', {}) or {}
+    atr_sl_mult = float(risk.get("atr_sl_mult", 1.0))
+    atr_tp_mult = float(risk.get("atr_tp_mult", 3.0))
+    qty = int(risk.get("qty", 1))
+
+    if signal_type == "buy":
+        sl_price  = round(current_price - atr_sl_mult * atr_val, 2)
+        tgt_price = round(current_price + atr_tp_mult * atr_val, 2)
+        side = "buy"
+    else:
+        sl_price  = round(current_price + atr_sl_mult * atr_val, 2)
+        tgt_price = round(current_price - atr_tp_mult * atr_val, 2)
+        side = "sell"
+
+    # Override SL/TP from signal metadata if present
+    if meta.get("stop_loss"):
+        sl_price = float(meta["stop_loss"])
+    if meta.get("take_profit_1") or meta.get("take_profit_2"):
+        tgt_price = float(meta.get("take_profit_2") or meta.get("take_profit_1"))
+
+    product_type = "perp" if instrument_type in ("perp", "crypto") else "futures"
+
+    try:
+        delta_resp = _call_delta_api(
+            account=account,
+            symbol=symbol,
+            side=side,
+            qty=qty,
+            product_type=product_type,
+            current_price=current_price,
+            sl_price=sl_price,
+            tp_price=tgt_price,
+        )
+        if delta_resp.get("success"):
+            bracket = delta_resp.get("bracket_ids", {})
+            exchange_order_id = bracket.get("main") or str(delta_resp.get("result", {}).get("id", ""))
+            _real_strategy = getattr(strategy, '_real', strategy)
+            order = create_order(
+                strategy=_real_strategy,
+                symbol=symbol,
+                side=signal_type,
+                quantity=qty,
+                price=Decimal(str(current_price)),
+                sl_price=Decimal(str(sl_price)),
+                target_price=Decimal(str(tgt_price)),
+                instrument_type=instrument_type,
+                broker="delta",
+                exchange_order_id=exchange_order_id,
+                mode="live",
+            )
+            if order and bracket:
+                try:
+                    order.broker_response = bracket
+                    order.save(update_fields=["broker_response"])
+                except Exception:
+                    pass
+            logger.info(
+                "Delta order placed | symbol=%s | side=%s | qty=%d | bracket=%s",
+                symbol, side, qty, bracket,
+            )
+            return order
+        else:
+            err = delta_resp.get("error", {}).get("message", str(delta_resp))
+            logger.error("Delta order FAILED | symbol=%s | err=%s", symbol, err)
+            _ws_notify_failure(effective_user, getattr(strategy, 'algo_name', ''), err)
+            return None
+    except Exception as exc:
+        logger.exception("_place_delta_order exception | symbol=%s | %s", symbol, exc)
+        return None
+
 
 def _delta_sign_and_post(api_key, api_secret, path, payload):
     """Delta India API — sign karke POST karo."""
@@ -1490,45 +1592,60 @@ def _call_delta_api(account, symbol, side, qty, product_type, current_price,
     if not resp.get("success"):
         return resp
 
-    # ── Step 2: SL order ──────────────────────────────────────────
+    main_order_id = str(resp.get("result", {}).get("id", ""))
+    sl_order_id = ""
+    tp_order_id = ""
+
+    # ── Step 2: SL bracket order ──────────────────────────────────
     if sl_price:
-        sl_side = "sell" if side == "buy" else "buy"
-        sl_payload = {
-            "product_id":    product_id,
-            "size":           qty,
-            "side":           sl_side,
-            "order_type":     "limit_order",
-            "limit_price":    str(round(sl_price, 2)),
-            "stop_price":     str(round(sl_price, 2)),
-            "time_in_force":  "gtc",
-            "reduce_only":    True,
-            "close_on_trigger": True,
-        }
-        import time as _time
-        _time.sleep(1.5)  # Position fill hone ka wait karo
-        sl_resp = _delta_sign_and_post(api_key, api_secret, "/v2/orders", sl_payload)
-        logger.info("Delta SL order | symbol=%s | sl_price=%s | success=%s",
-                    symbol, sl_price, sl_resp.get("success"))
-        if not sl_resp.get("success"):
-            logger.warning("Delta SL order FAILED | resp=%s", sl_resp)
+        try:
+            sl_side = "sell" if side == "buy" else "buy"
+            sl_payload = {
+                "product_id":    product_id,
+                "size":           qty,
+                "side":           sl_side,
+                "order_type":     "stop_order",
+                "stop_price":     str(round(sl_price, 2)),
+                "time_in_force":  "gtc",
+                "reduce_only":    True,
+                "close_on_trigger": True,
+            }
+            import time as _time
+            _time.sleep(1.5)  # Position fill hone ka wait karo
+            sl_resp = _delta_sign_and_post(api_key, api_secret, "/v2/orders", sl_payload)
+            if sl_resp.get("success"):
+                sl_order_id = str(sl_resp.get("result", {}).get("id", ""))
+                logger.info("Delta SL order placed | symbol=%s | sl_price=%s | sl_id=%s",
+                            symbol, sl_price, sl_order_id)
+            else:
+                logger.warning("Delta SL order FAILED | symbol=%s | resp=%s", symbol, sl_resp)
+        except Exception as _sl_e:
+            logger.warning("Delta SL bracket error | symbol=%s | %s", symbol, _sl_e)
 
-    # ── Step 3: TP order ──────────────────────────────────────────
+    # ── Step 3: TP bracket order ──────────────────────────────────
     if tp_price:
-        tp_side = "sell" if side == "buy" else "buy"
-        tp_payload = {
-            "product_id":   product_id,
-            "size":          qty,
-            "side":          tp_side,
-            "order_type":    "limit_order",
-            "limit_price":   str(round(tp_price, 2)),
-            "time_in_force": "gtc",
-        }
-        tp_resp = _delta_sign_and_post(api_key, api_secret, "/v2/orders", tp_payload)
-        logger.info("Delta TP order | symbol=%s | tp_price=%s | success=%s",
-                    symbol, tp_price, tp_resp.get("success"))
-        if not tp_resp.get("success"):
-            logger.warning("Delta TP order FAILED | resp=%s", tp_resp)
+        try:
+            tp_side = "sell" if side == "buy" else "buy"
+            tp_payload = {
+                "product_id":   product_id,
+                "size":          qty,
+                "side":          tp_side,
+                "order_type":    "limit_order",
+                "limit_price":   str(round(tp_price, 2)),
+                "time_in_force": "gtc",
+                "reduce_only":   True,
+            }
+            tp_resp = _delta_sign_and_post(api_key, api_secret, "/v2/orders", tp_payload)
+            if tp_resp.get("success"):
+                tp_order_id = str(tp_resp.get("result", {}).get("id", ""))
+                logger.info("Delta TP order placed | symbol=%s | tp_price=%s | tp_id=%s",
+                            symbol, tp_price, tp_order_id)
+            else:
+                logger.warning("Delta TP order FAILED | symbol=%s | resp=%s", symbol, tp_resp)
+        except Exception as _tp_e:
+            logger.warning("Delta TP bracket error | symbol=%s | %s", symbol, _tp_e)
 
+    resp["bracket_ids"] = {"main": main_order_id, "sl": sl_order_id, "tp": tp_order_id}
     return resp
 
 

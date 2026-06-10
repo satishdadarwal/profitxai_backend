@@ -1101,32 +1101,24 @@ def execute_silver_bullet_cycle(strategy, symbol: str) -> dict:
     if sig is None:
         return _null_sb_signal(symbol)
 
-    # ✅ FIX 1: Duplicate trade check — symbol को clean करके match करो
+    # Duplicate check — Order model se check karo (symbol + user)
     try:
-        from apps.paper_trading.models import PaperTrade
+        from apps.orders.models import Order as _Order
+        from django.db.models import Q
 
         clean_symbol = symbol.replace("NSE:", "").replace("-INDEX", "").strip()
-        already_open = PaperTrade.objects.filter(
-            strategy_id=str(strategy.id),
-            symbol__icontains=clean_symbol,
-            status="open",
-        ).exists()
-        if not already_open:
-            from apps.orders.models import Order as _Order
-            from django.utils import timezone
-            today = timezone.now().date()
-            _check_mode = getattr(strategy, 'mode', 'paper')
-            already_open = _Order.objects.filter(
-                strategy_id=strategy.id,
-                status__in=["open", "pending", "filled"],
-                mode=_check_mode,
-                created_at__date=today,
-            ).exclude(symbol_display='').exists()
+        _user = getattr(strategy, 'user', None)
+        _qs = _Order.objects.filter(
+            Q(symbol_display__icontains=clean_symbol) | Q(asset__symbol__icontains=clean_symbol),
+            status__in=["open", "pending"],
+        )
+        if _user:
+            _qs = _qs.filter(user=_user)
+        already_open = _qs.exists()
 
         if already_open:
             logger.info(
-                "[%s] Skipping — open trade already exists for this strategy",
-                symbol,
+                "[SB] Duplicate skip: open position exists for %s", symbol,
             )
             return _null_sb_signal(symbol)
 

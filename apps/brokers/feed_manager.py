@@ -68,21 +68,24 @@ def on_price_tick(symbol: str, ltp: float, extra_data: dict = None):
         _update_position_pnl(symbol, ltp)
         try:
             from decimal import Decimal as _D
-            from apps.paper_trading.models import PaperTrade, normalize_symbol
-            _sym = normalize_symbol(symbol)
+            from apps.orders.models import Order as _Order
             _ltp = _D(str(ltp))
-            _open_trades = PaperTrade.objects.filter(symbol=_sym, status='open')
-            for _pt in _open_trades:
-                if _pt.entry_price and _pt.quantity:
-                    if _pt.side == 'buy':
-                        _upnl = (_ltp - _pt.entry_price) * _pt.quantity
+            _clean = symbol.replace("NSE:", "").replace("-INDEX", "").replace("BSE:", "").strip()
+            _open_orders = _Order.objects.filter(
+                symbol_display__icontains=_clean,
+                status='open',
+            ).only('id', 'side', 'entry_price', 'quantity', 'current_price', 'unrealized_pnl')
+            for _ord in _open_orders:
+                if _ord.entry_price and _ord.quantity:
+                    if _ord.side == 'buy':
+                        _upnl = (_ltp - _ord.entry_price) * _ord.quantity
                     else:
-                        _upnl = (_pt.entry_price - _ltp) * _pt.quantity
-                    _pt.current_price = _ltp
-                    _pt.unrealized_pnl = _upnl
-                    _pt.save(update_fields=['current_price', 'unrealized_pnl', 'updated_at'])
+                        _upnl = (_ord.entry_price - _ltp) * _ord.quantity
+                    _ord.current_price = _ltp
+                    _ord.unrealized_pnl = _upnl
+                    _ord.save(update_fields=['current_price', 'unrealized_pnl', 'updated_at'])
         except Exception as _pe:
-            logger.error("PaperTrade tick | %s | %s", symbol, _pe)
+            logger.error("Order tick update | %s | %s", symbol, _pe)
 
     except Exception as e:
         logger.error("on_price_tick error | symbol=%s | %s", symbol, e)
