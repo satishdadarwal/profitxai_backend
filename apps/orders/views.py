@@ -772,7 +772,8 @@ class TradeJournalListView(APIView):
                 "side": side, "mode": o.mode or "live",
                 "quantity": qty, "price": price,
                 "amount": qty * price, "fee": 0.0,
-                "realized_pnl": None, "net_pnl": None,
+                "realized_pnl": float(o.realized_pnl) if o.realized_pnl is not None else None,
+                "net_pnl": float(o.realized_pnl) if o.realized_pnl is not None else None,
                 "notes": o.journal_notes or "",
                 "tags": o.tags or [],
                 "emoji_reaction": o.emoji_reaction or "",
@@ -795,9 +796,23 @@ class TradeJournalListView(APIView):
                 sym = r["symbol"]
                 if buys.get(sym):
                     buy = buys[sym].pop(0)
-                    pnl = round((r["price"] - buy["price"]) * r["quantity"], 2)
-                    r["realized_pnl"] = pnl
-                    r["net_pnl"] = pnl
+                    # Use stored realized_pnl first — only calculate if missing
+                    if r["realized_pnl"] is not None:
+                        pass  # already populated from Order.realized_pnl
+                    else:
+                        entry = buy["price"]
+                        exit_p = r["price"]
+                        qty = r["quantity"]
+                        if entry > 0 and exit_p > 0 and qty > 0:
+                            if buy.get("side") in ("buy", "long"):
+                                pnl = (exit_p - entry) * qty
+                            else:
+                                pnl = (entry - exit_p) * qty
+                            pnl = round(pnl, 2)
+                        else:
+                            pnl = 0.0
+                        r["realized_pnl"] = pnl
+                        r["net_pnl"] = pnl
 
         results.sort(key=lambda x: x["created_at"], reverse=True)
         paginator = Paginator(results, 20)
