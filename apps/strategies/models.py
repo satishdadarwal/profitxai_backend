@@ -368,6 +368,16 @@ class UserStrategyPreference(models.Model):
         default=PreferredMode.PAPER,
         help_text="User ka chosen mode: paper ya live",
     )
+    exit_mode = models.CharField(
+        max_length=20,
+        choices=[
+            ('gtt_oco',     'GTT OCO — Fixed SL/Target'),
+            ('smart_trail', 'Smart Trail — Trailing SL'),
+            ('both',        'Both — Trail + GTT backup'),
+        ],
+        default='gtt_oco',
+        help_text="Per-strategy exit order type for live options trades",
+    )
     is_running = models.BooleanField(
         default=False,
         help_text="Is user ke liye yeh strategy chal rahi hai?",

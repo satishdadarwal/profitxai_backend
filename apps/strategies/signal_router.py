@@ -1150,12 +1150,25 @@ def _fyers_options_order(strategy, signal, fyers, account, qty: int, risk: dict,
 
                 # ── exit_mode ke according order place karo ──────
                 _exit_user = effective_user or strategy.user
+                _exit_mode = 'gtt_oco'
                 try:
-                    _exit_mode = _exit_user.trading_profile.exit_mode
+                    from apps.strategies.models import UserStrategyPreference
+                    _real_strat_id = getattr(strategy, '_real', strategy).id
+                    _pref = UserStrategyPreference.objects.get(user=_exit_user, strategy_id=_real_strat_id)
+                    _exit_mode = _pref.exit_mode or 'gtt_oco'
+                    logger.info("exit_mode from UserStrategyPreference | user=%s | strategy=%s | mode=%s",
+                                _exit_user.pk, _real_strat_id, _exit_mode)
                 except Exception:
-                    _exit_mode = 'gtt_oco'
+                    try:
+                        _exit_mode = _exit_user.trading_profile.exit_mode
+                        logger.info("exit_mode from TradingProfile (fallback) | user=%s | mode=%s",
+                                    _exit_user.pk, _exit_mode)
+                    except Exception:
+                        logger.info("exit_mode fallback to default gtt_oco | user=%s", _exit_user.pk)
 
                 if _exit_mode in ('gtt_oco', 'both'):
+                    logger.info("Placing GTT OCO | user=%s | symbol=%s | sl=%.2f | tgt=%.2f",
+                                _exit_user.pk, option_symbol, gtt_sl, gtt_tgt)
                     _place_fyers_gtt(
                         fyers=fyers,
                         option_symbol=option_symbol,
@@ -1221,6 +1234,7 @@ def _place_fyers_gtt(fyers, option_symbol: str, actual_qty: int, sl_price: float
             },
         },
     }
+    logger.info("GTT OCO placing | symbol=%s | sl=%.2f | tgt=%.2f | payload=%s", option_symbol, sl_price, tgt_price, gtt_data)
     resp = fyers.place_gtt_order(data=gtt_data)
     logger.info("GTT OCO placed | symbol=%s | sl=%.2f | tgt=%.2f | resp=%s", option_symbol, sl_price, tgt_price, resp)
     return resp
