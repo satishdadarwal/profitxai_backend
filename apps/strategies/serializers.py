@@ -127,6 +127,7 @@ class StrategySerializer(serializers.ModelSerializer):
     preferred_mode  = serializers.SerializerMethodField()
     effective_mode  = serializers.SerializerMethodField()
     can_live_trade  = serializers.SerializerMethodField()
+    exit_mode       = serializers.SerializerMethodField()
 
     class Meta:
         model = Strategy
@@ -161,13 +162,14 @@ class StrategySerializer(serializers.ModelSerializer):
             "preferred_mode",
             "effective_mode",
             "can_live_trade",
+            "exit_mode",
         ]
         read_only_fields = [
             "id", "state", "is_active", "is_running",
             "broker_slug", "broker_label", "error_msg",
             "started_at", "stopped_at", "created_at", "updated_at",
             "is_global", "allowed_plans", "created_by_admin", "is_editable",
-            "preferred_mode", "effective_mode", "can_live_trade",
+            "preferred_mode", "effective_mode", "can_live_trade", "exit_mode",
         ]
 
     def get_broker_label(self, obj):
@@ -218,6 +220,25 @@ class StrategySerializer(serializers.ModelSerializer):
             return _user_can_live_trade(request.user)
         except Exception:
             return False
+
+    def get_exit_mode(self, obj):
+        """User ka per-strategy exit mode — fallback: trading_profile > default."""
+        request = self.context.get("request")
+        if not request or not request.user.is_authenticated:
+            return 'gtt_oco'
+        try:
+            from .models import UserStrategyPreference
+            pref = UserStrategyPreference.objects.filter(
+                user=request.user, strategy=obj
+            ).first()
+            if pref:
+                return pref.exit_mode
+        except Exception:
+            pass
+        try:
+            return request.user.trading_profile.exit_mode
+        except Exception:
+            return 'gtt_oco'
 
     def validate_symbols(self, value):
         errors = []

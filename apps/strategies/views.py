@@ -391,13 +391,14 @@ class UserStrategyPreferenceView(APIView):
         return Response({
             "strategy_id":     str(strategy.id),
             "strategy_name":   strategy.name,
-            "master_mode":     strategy.mode,       # admin ne jo set kiya
-            "preferred_mode":  pref.preferred_mode, # user ka choice
+            "master_mode":     strategy.mode,
+            "preferred_mode":  pref.preferred_mode,
             "effective_mode":  pref.effective_mode(),
             "is_running":      pref.is_running,
             "can_live_trade":  can_live,
             "algo_name":       strategy.algo_name,
             "symbols":         strategy.symbols or [strategy.symbol],
+            "exit_mode":       pref.exit_mode,
         })
 
     def post(self, request, strategy_id):
@@ -425,6 +426,17 @@ class UserStrategyPreferenceView(APIView):
 
         new_mode   = request.data.get("preferred_mode")
         action     = request.data.get("action")  # "start" | "stop"
+        new_exit_mode = request.data.get("exit_mode")
+
+        # ── Exit mode change ─────────────────────────────────────
+        _valid_exit_modes = ('gtt_oco', 'smart_trail', 'both')
+        if new_exit_mode is not None:
+            if new_exit_mode not in _valid_exit_modes:
+                return Response(
+                    {"error": f"exit_mode must be one of: {', '.join(_valid_exit_modes)}"},
+                    status=400,
+                )
+            pref.exit_mode = new_exit_mode
 
         # ── Mode change ──────────────────────────────────────────
         if new_mode:
@@ -463,6 +475,7 @@ class UserStrategyPreferenceView(APIView):
             "preferred_mode": pref.preferred_mode,
             "effective_mode": pref.effective_mode(),
             "is_running":     pref.is_running,
+            "exit_mode":      pref.exit_mode,
             "message": (
                 f"Mode: {pref.preferred_mode.upper()} | "
                 f"{'▶ Running' if pref.is_running else '⏹ Stopped'}"
