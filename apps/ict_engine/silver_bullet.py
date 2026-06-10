@@ -408,6 +408,18 @@ class SilverBullet2MStrategy:
 
         logger.info("[%s] Silver Bullet bias: %s", symbol, bias)
 
+        # Step 1b: 5M structure confirmation (EMA20 alignment)
+        if not df_5m.empty and len(df_5m) >= 20:
+            _ema20_5m = df_5m["close"].ewm(span=20, adjust=False).mean()
+            _close_5m = float(df_5m["close"].iloc[-1])
+            _ema20_5m_val = float(_ema20_5m.iloc[-1])
+            if bias == "bullish" and _close_5m < _ema20_5m_val:
+                logger.info("[%s] 5M structure bearish (close=%.2f < EMA20=%.2f), skip", symbol, _close_5m, _ema20_5m_val)
+                return None
+            if bias == "bearish" and _close_5m > _ema20_5m_val:
+                logger.info("[%s] 5M structure bullish (close=%.2f > EMA20=%.2f), skip", symbol, _close_5m, _ema20_5m_val)
+                return None
+
         # Step 2: Liquidity sweep
         sweep = self._detect_sweep(df_2m, bias)
         if not sweep:
@@ -461,6 +473,14 @@ class SilverBullet2MStrategy:
         risk_points = abs(entry_price - stop_loss)
         reward_points = risk_points * self.min_rr
 
+        # Sweep rejection strength filter
+        if sweep.get("rejection", 0) < risk_points * 0.3:
+            logger.info(
+                "[%s] Weak sweep rejection: %.2f < %.2f (threshold)",
+                symbol, sweep.get("rejection", 0), risk_points * 0.3,
+            )
+            return None
+
         if bias == "bullish":
             tp1 = entry_price + (risk_points * 2.0)
             tp2 = entry_price + reward_points
@@ -490,6 +510,11 @@ class SilverBullet2MStrategy:
         except Exception:
             kz_name = "regular"
 
+        # Killzone mandatory — skip regular market hours
+        if kz_name == "regular":
+            logger.info("[%s] Silver Bullet: No killzone context, skipping", symbol)
+            return None
+
         # Step 10: Confluence score
         score = 50.0
         if fvg:
@@ -504,6 +529,36 @@ class SilverBullet2MStrategy:
             score += 5
 
         score = min(round(score, 1), 100.0)
+
+        # Score threshold filter
+        if score < 65:
+            logger.info("[%s] Score too low: %.1f < 65, skipping", symbol, score)
+            return None
+
+        # Greeks filter — delta 0.25–0.65, theta > -15 for ATM option
+        try:
+            import datetime as _dt
+            from apps.options.black_scholes import compute_greeks as _cg
+            _opt_type = "call" if bias == "bullish" else "put"
+            _sym_up = symbol.upper()
+            if "BANKNIFTY" in _sym_up or "FINNIFTY" in _sym_up:
+                _strike_step, _exp_wday = 100, 3  # Thursday
+            else:
+                _strike_step, _exp_wday = 50, 1   # Tuesday (NIFTY)
+            _today = _dt.date.today()
+            _days_ahead = (_exp_wday - _today.weekday()) % 7 or 7
+            _T = max(_days_ahead / 365, 1 / 365)
+            _atm = round(entry_price / _strike_step) * _strike_step
+            _g = _cg(entry_price, _atm, _T, 0.065, 0.15, _opt_type)
+            _delta_abs = abs(_g["delta"])
+            if not (0.25 <= _delta_abs <= 0.65):
+                logger.info("[%s] Greeks filter: delta=%.4f out of [0.25, 0.65], skip", symbol, _delta_abs)
+                return None
+            if _g["theta"] < -15:
+                logger.info("[%s] Greeks filter: theta=%.2f < -15, skip", symbol, _g["theta"])
+                return None
+        except Exception as _ge:
+            logger.debug("[%s] Greeks filter error (skipping check): %s", symbol, _ge)
 
         tags = [bias.upper(), f"SWEEP_{sweep['type']}", "MSS"]
         if fvg:
