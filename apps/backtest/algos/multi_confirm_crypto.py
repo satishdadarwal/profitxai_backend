@@ -446,6 +446,48 @@ class MultiConfirmCryptoAlgo(_Base):
         buy_score, buy_reasons = _score_buy()
         sell_score, sell_reasons = _score_sell()
 
+        # ── HTF 4H bias filter ────────────────────────────────────────────────
+        try:
+            _htf4h_cr = ctx.get("htf4h") or ctx.get("htf_4h") or []
+            if _htf4h_cr and len(_htf4h_cr) >= 10:
+                _4hc_cr = [_get_close(c) for c in _htf4h_cr]
+                _n4h = min(20, len(_4hc_cr))
+                _e4h_cr = sum(_4hc_cr[:_n4h]) / _n4h
+                _k4h = 2 / 21
+                for _v4h in _4hc_cr[_n4h:]:
+                    _e4h_cr = _v4h * _k4h + _e4h_cr * (1 - _k4h)
+                if _4hc_cr[-1] > _e4h_cr:  # 4H bullish
+                    buy_score = min(buy_score + 5, 100.0)
+                    buy_reasons.append("4H bias bullish ✅")
+                    sell_score = 0.0  # 4H conflicts with SELL
+                    logger.debug("MultiConfirmCrypto 4H bullish — BUY +5, SELL blocked")
+                else:  # 4H bearish
+                    sell_score = min(sell_score + 5, 100.0)
+                    sell_reasons.append("4H bias bearish ✅")
+                    buy_score = 0.0  # 4H conflicts with BUY
+                    logger.debug("MultiConfirmCrypto 4H bearish — SELL +5, BUY blocked")
+        except Exception as _e4h_cr:
+            logger.debug("MultiConfirmCrypto 4H bias error: %s", _e4h_cr)
+
+        # ── DOL (Draw on Liquidity) — nearest BSL/SSL as target ──────────────
+        try:
+            _highs_cr = [float(c["high"] if isinstance(c, dict) else c.high) for c in candles]
+            _lows_cr  = [float(c["low"] if isinstance(c, dict) else c.low) for c in candles]
+            _above_cr = [h for h in _highs_cr if h > current_price]
+            if _above_cr:
+                _dol_bsl_cr = min(_above_cr)
+                if (_dol_bsl_cr - current_price) / current_price * 100 >= 0.3:
+                    buy_score = min(buy_score + 10, 100.0)
+                    buy_reasons.append(f"DOL_BSL={_dol_bsl_cr:.4f}")
+            _below_cr = [l for l in _lows_cr if 0 < l < current_price]
+            if _below_cr:
+                _dol_ssl_cr = max(_below_cr)
+                if (current_price - _dol_ssl_cr) / current_price * 100 >= 0.3:
+                    sell_score = min(sell_score + 10, 100.0)
+                    sell_reasons.append(f"DOL_SSL={_dol_ssl_cr:.4f}")
+        except Exception:
+            pass
+
         # ATR actual value (for SL/TP in signal_router)
         atr_actual = atr if atr else round(float(price) * atr_pct / 100, 4)
 

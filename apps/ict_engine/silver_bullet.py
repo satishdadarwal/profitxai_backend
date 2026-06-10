@@ -395,6 +395,7 @@ class SilverBullet2MStrategy:
         df_1h: pd.DataFrame,
         df_5m: pd.DataFrame,
         df_2m: pd.DataFrame,
+        df_4h: pd.DataFrame = None,
     ) -> Optional[SilverBulletSignal]:
         """
         Complete Silver Bullet analysis.
@@ -419,6 +420,25 @@ class SilverBullet2MStrategy:
             if bias == "bearish" and _close_5m > _ema20_5m_val:
                 logger.info("[%s] 5M structure bullish (close=%.2f > EMA20=%.2f), skip", symbol, _close_5m, _ema20_5m_val)
                 return None
+
+        # Step 1c: 4H bias filter — conflict = skip, alignment = A+ bonus later
+        _4h_bias_ok = False
+        try:
+            if df_4h is not None and not df_4h.empty and len(df_4h) >= 10:
+                _ema4h = df_4h["close"].ewm(span=20, adjust=False).mean()
+                _close4h = float(df_4h["close"].iloc[-1])
+                _ema4h_val = float(_ema4h.iloc[-1])
+                _bias4h = "bullish" if _close4h > _ema4h_val else "bearish"
+                if _bias4h != bias:
+                    logger.info(
+                        "[%s] 4H bias %s conflicts with %s bias — skip",
+                        symbol, _bias4h, bias
+                    )
+                    return None
+                _4h_bias_ok = True
+                logger.info("[%s] 4H bias ✅ %s aligns with entry", symbol, _bias4h)
+        except Exception as _4he:
+            logger.debug("[%s] 4H bias check error: %s", symbol, _4he)
 
         # Step 2: Liquidity sweep
         sweep = self._detect_sweep(df_2m, bias)
@@ -578,6 +598,28 @@ class SilverBullet2MStrategy:
         except Exception:
             pass
 
+        # 4H bias A+ bonus (+5 score)
+        if _4h_bias_ok:
+            score += 5
+
+        # DOL (Draw on Liquidity) — nearest BSL/SSL as target
+        _dol_found = False
+        try:
+            if bias == 'bullish':
+                _above_dol = [float(h) for h in df_2m['high'].values if h > entry_price]
+                _dol_level_sb = float(min(_above_dol)) if _above_dol else None
+            else:
+                _below_dol = [float(l) for l in df_2m['low'].values if 0 < l < entry_price]
+                _dol_level_sb = float(max(_below_dol)) if _below_dol else None
+            if _dol_level_sb:
+                _dol_dp = abs(_dol_level_sb - entry_price) / entry_price * 100
+                if _dol_dp >= 0.3:
+                    score += 10
+                    _dol_found = True
+                    logger.info("[%s] DOL ✅ level=%.2f dist=%.2f%%", symbol, _dol_level_sb, _dol_dp)
+        except Exception as _dole:
+            logger.debug("[%s] DOL check error: %s", symbol, _dole)
+
         score = min(round(score, 1), 100.0)
 
         # Score threshold filter
@@ -615,6 +657,8 @@ class SilverBullet2MStrategy:
             tags.append("FVG")
         if kz_name != "regular":
             tags.append(f"KZ_{kz_name.upper()}")
+        if _dol_found:
+            tags.append('DOL')
 
         signal = SilverBulletSignal(
             direction=SBDirection.LONG if bias == "bullish" else SBDirection.SHORT,
@@ -929,6 +973,12 @@ def execute_silver_bullet_cycle(strategy, symbol: str) -> dict:
         logger.error("SB candle fetch error | symbol=%s | err=%s", symbol, e)
         return _null_sb_signal(symbol)
 
+    # 4H candles — graceful fallback if unavailable
+    try:
+        htf4h_raw = fetch_candles_for_strategy(strategy, symbol, "240", bars=100) or []
+    except Exception:
+        htf4h_raw = []
+
     if not htf_raw or not ltf_raw:
         # ✅ FIX: LTF 0 candles aana common hai after-hours (Fyers 1m data nahi deta)
         # MTF se fallback karo instead of returning null signal immediately
@@ -991,6 +1041,7 @@ def execute_silver_bullet_cycle(strategy, symbol: str) -> dict:
     df_1h = _to_df(htf_raw)
     df_5m = _to_df(mtf_raw) if mtf_raw else _to_df(ltf_raw)
     df_2m = _to_df(ltf_raw)
+    df_4h = _to_df(htf4h_raw) if htf4h_raw else pd.DataFrame()
 
     if ltf_tf == "1":
         df_2m = df_2m.resample("2min").agg({
@@ -1041,6 +1092,7 @@ def execute_silver_bullet_cycle(strategy, symbol: str) -> dict:
             df_1h=df_1h,
             df_5m=df_5m,
             df_2m=df_2m,
+            df_4h=df_4h if not df_4h.empty else None,
         )
     except Exception as e:
         logger.error("SB analyze error | symbol=%s | err=%s", symbol, e, exc_info=True)

@@ -372,6 +372,33 @@ class NseOptionSellerAlgo(_Base):
             sym, dte, exp_factor,
         )
 
+        # ── 5b. HTF 4H bias filter ────────────────────────────────
+        try:
+            _htf4h_sel = ctx.get("htf4h") or ctx.get("htf_4h") or []
+            if _htf4h_sel and len(_htf4h_sel) >= 10 and signal_type != "hold":
+                _4hc_sel = self._extract_closes(_htf4h_sel)
+                _ema4h_sel = _ema(_4hc_sel, 20)
+                if _ema4h_sel:
+                    _4h_bull_sel = _4hc_sel[-1] > _ema4h_sel[-1]
+                    # CE sell (bearish signal): 4H must NOT be bullish
+                    if option_type == "CE" and _4h_bull_sel:
+                        logger.info("NseOptionSeller 4H bullish conflicts with CE sell — skip")
+                        signal_type = "hold"
+                        confidence = 0.0
+                        reason = "4H bias bullish conflicts with CE sell"
+                    # PE sell (bullish signal): 4H must NOT be bearish
+                    elif option_type == "PE" and not _4h_bull_sel:
+                        logger.info("NseOptionSeller 4H bearish conflicts with PE sell — skip")
+                        signal_type = "hold"
+                        confidence = 0.0
+                        reason = "4H bias bearish conflicts with PE sell"
+                    else:
+                        confidence = min(confidence + 5, 99.0)
+                        reason += " | 4H_aligned ✅"
+                        logger.debug("NseOptionSeller 4H ✅ aligned | %s", option_type)
+        except Exception as _e4h_sel:
+            logger.debug("NseOptionSeller 4H bias error: %s", _e4h_sel)
+
         # ── 6. Confidence threshold check ────────────────────────
         if signal_type == "hold" or confidence < self.min_conf:
             return AlgoSignal(

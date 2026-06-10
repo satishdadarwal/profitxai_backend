@@ -157,7 +157,8 @@ class ConfluenceOptionsAlgo:
         return self.parameters.get(key, self.DEFAULT_PARAMS.get(key))
 
     def generate_signal(self, symbol: str, candles_5m: list, candles_15m: list,
-                        candles_1h: list, sb_signal: dict = None) -> Optional[dict]:
+                        candles_1h: list, sb_signal: dict = None,
+                        candles_4h: list = None) -> Optional[dict]:
         """
         Main signal generation.
         sb_signal: Silver Bullet signal dict (from execute_silver_bullet_cycle)
@@ -204,6 +205,33 @@ class ConfluenceOptionsAlgo:
 
         sb_long  = sb_direction == "long"  and sb_score >= self._p("min_sb_score")
         sb_short = sb_direction == "short" and sb_score >= self._p("min_sb_score")
+
+        # ── HTF 4H bias filter ────────────────────────────────────────────────
+        _4h_bonus = False
+        try:
+            if candles_4h and len(candles_4h) >= 10:
+                _4hc = [float(c["close"] if isinstance(c, dict) else c.close) for c in candles_4h]
+                _n4h = min(20, len(_4hc))
+                _e4h = sum(_4hc[:_n4h]) / _n4h
+                _k4h = 2 / 21
+                for _v4h in _4hc[_n4h:]:
+                    _e4h = _v4h * _k4h + _e4h * (1 - _k4h)
+                _bias4h_conf = "bullish" if _4hc[-1] > _e4h else "bearish"
+                _entry_bias = "bullish" if sb_direction == "long" else "bearish"
+                if _bias4h_conf != _entry_bias:
+                    logger.debug(
+                        "ConfluenceOptions 4H bias %s conflicts with %s — skip",
+                        _bias4h_conf, _entry_bias
+                    )
+                    if sb_direction == "long":
+                        sb_long = False
+                    else:
+                        sb_short = False
+                else:
+                    _4h_bonus = True
+                    logger.debug("ConfluenceOptions 4H bias ✅ %s aligns", _bias4h_conf)
+        except Exception as _4he_conf:
+            logger.debug("ConfluenceOptions 4H bias error: %s", _4he_conf)
 
         # ── Multi Confirm scoring ────────────────────────────────────────────
         def _score_bull() -> Tuple[float, List[str]]:
@@ -254,6 +282,20 @@ class ConfluenceOptionsAlgo:
         # ── Combined confluence score ─────────────────────────────────────────
         # CE signal: SB long + MC bullish
         if sb_long and bull_score >= min_mc:
+            # DOL: nearest BSL above spot = bullish draw on liquidity
+            try:
+                _highs_ce = [float(c["high"] if isinstance(c, dict) else c.high) for c in candles_5m]
+                _above_ce = [h for h in _highs_ce if h > spot]
+                if _above_ce:
+                    _dol_ce = min(_above_ce)
+                    if (_dol_ce - spot) / spot * 100 >= 0.3:
+                        bull_score = min(bull_score + 10, 100.0)
+                        logger.debug("ConfluenceOptions CE DOL ✅ bsl=%.2f", _dol_ce)
+            except Exception:
+                pass
+            # 4H A+ bonus
+            if _4h_bonus:
+                bull_score = min(bull_score + 5, 100.0)
             combined = (sb_score * self._p("sb_weight") + bull_score * self._p("mc_weight")) / 100
             if combined >= self._p("min_confidence"):
                 strike = _strike_price(spot, symbol, "CE", self._p("otm_shift"))
@@ -336,6 +378,20 @@ class ConfluenceOptionsAlgo:
 
         # PE signal: SB short + MC bearish
         if sb_short and bear_score >= min_mc:
+            # DOL: nearest SSL below spot = bearish draw on liquidity
+            try:
+                _lows_pe = [float(c["low"] if isinstance(c, dict) else c.low) for c in candles_5m]
+                _below_pe = [l for l in _lows_pe if 0 < l < spot]
+                if _below_pe:
+                    _dol_pe = max(_below_pe)
+                    if (spot - _dol_pe) / spot * 100 >= 0.3:
+                        bear_score = min(bear_score + 10, 100.0)
+                        logger.debug("ConfluenceOptions PE DOL ✅ ssl=%.2f", _dol_pe)
+            except Exception:
+                pass
+            # 4H A+ bonus
+            if _4h_bonus:
+                bear_score = min(bear_score + 5, 100.0)
             combined = (sb_score * self._p("sb_weight") + bear_score * self._p("mc_weight")) / 100
             if combined >= self._p("min_confidence"):
                 strike = _strike_price(spot, symbol, "PE", self._p("otm_shift"))

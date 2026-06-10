@@ -558,6 +558,48 @@ class MultiConfirmOptionsAlgo(_Base):
         bear_score, bear_reasons = _score_bear()
         min_conf = self._p("min_confidence")
 
+        # ── HTF 4H bias filter ────────────────────────────────────────────────
+        try:
+            _htf4h_mc = ctx.get("htf4h") or ctx.get("htf_4h") or []
+            if _htf4h_mc and len(_htf4h_mc) >= 10:
+                _4hc_mc = [_get_close(c) for c in _htf4h_mc]
+                _n4h = min(20, len(_4hc_mc))
+                _e4h_mc = sum(_4hc_mc[:_n4h]) / _n4h
+                _k4h = 2 / 21
+                for _v4h in _4hc_mc[_n4h:]:
+                    _e4h_mc = _v4h * _k4h + _e4h_mc * (1 - _k4h)
+                if _4hc_mc[-1] > _e4h_mc:  # 4H bullish
+                    bull_score = min(bull_score + 5, 100.0)
+                    bull_reasons.append("4H bias bullish ✅")
+                    bear_score = 0.0  # 4H conflicts with PE signal
+                    logger.debug("MultiConfirmOptions 4H bullish — CE +5, PE blocked")
+                else:  # 4H bearish
+                    bear_score = min(bear_score + 5, 100.0)
+                    bear_reasons.append("4H bias bearish ✅")
+                    bull_score = 0.0  # 4H conflicts with CE signal
+                    logger.debug("MultiConfirmOptions 4H bearish — PE +5, CE blocked")
+        except Exception as _e4h_mc:
+            logger.debug("MultiConfirmOptions 4H bias error: %s", _e4h_mc)
+
+        # ── DOL (Draw on Liquidity) — nearest BSL/SSL as target ──────────────
+        try:
+            _highs_mc = [float(c["high"] if isinstance(c, dict) else c.high) for c in main_candles]
+            _lows_mc  = [float(c["low"] if isinstance(c, dict) else c.low) for c in main_candles]
+            _above_mc = [h for h in _highs_mc if h > spot]
+            if _above_mc:
+                _dol_bsl_mc = min(_above_mc)
+                if (_dol_bsl_mc - spot) / spot * 100 >= 0.3:
+                    bull_score = min(bull_score + 10, 100.0)
+                    bull_reasons.append(f"DOL_BSL={_dol_bsl_mc:.0f}")
+            _below_mc = [l for l in _lows_mc if 0 < l < spot]
+            if _below_mc:
+                _dol_ssl_mc = max(_below_mc)
+                if (spot - _dol_ssl_mc) / spot * 100 >= 0.3:
+                    bear_score = min(bear_score + 10, 100.0)
+                    bear_reasons.append(f"DOL_SSL={_dol_ssl_mc:.0f}")
+        except Exception:
+            pass
+
         # ✅ ATR calculate karo — SL/TP ke liye
         atr_val = _atr(main_candles, period=14)
 
