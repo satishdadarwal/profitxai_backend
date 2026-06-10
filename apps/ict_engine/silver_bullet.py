@@ -457,9 +457,18 @@ class SilverBullet2MStrategy:
         # Bullish → price must be in discount zone (below equilibrium)
         # Bearish → price must be in premium zone (above equilibrium)
         try:
-            _lookback = min(100, len(df_2m))
-            _ph = float(df_2m['high'].iloc[-_lookback:].max())
-            _pl = float(df_2m['low'].iloc[-_lookback:].min())
+            from datetime import timedelta
+            today = df_2m.index[-1].date()
+            yesterday = today - timedelta(days=1)
+            prev_day = df_2m[df_2m.index.date == yesterday]
+            if not prev_day.empty and len(prev_day) > 5:
+                _ph = float(prev_day['high'].max())
+                _pl = float(prev_day['low'].min())
+                logger.debug("[%s] PD Zone using PDH=%.2f PDL=%.2f", symbol, _ph, _pl)
+            else:
+                _ph = float(df_2m['high'].max())
+                _pl = float(df_2m['low'].min())
+                logger.debug("[%s] PD Zone fallback: today's range", symbol)
             _range = _ph - _pl
             if _range > 0:
                 _eq = _pl + (_range * 0.5)

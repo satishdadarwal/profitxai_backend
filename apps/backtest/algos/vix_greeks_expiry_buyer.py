@@ -367,9 +367,25 @@ def generate_signal(
     # CE (bullish) → spot must be in discount zone (below equilibrium)
     # PE (bearish) → spot must be in premium zone (above equilibrium)
     try:
-        _recent_vg = candles_5m[-100:] if len(candles_5m) >= 100 else candles_5m
-        _ph_vg = max(c.get('high', 0) for c in _recent_vg)
-        _pl_vg = min(c.get('low', float('inf')) for c in _recent_vg)
+        import datetime as _dt_pd
+        _last_ts_vg = candles_5m[-1].get('ts') or candles_5m[-1].get('timestamp') or candles_5m[-1].get('t') if candles_5m else None
+        if _last_ts_vg:
+            _today_d_vg = _dt_pd.datetime.fromtimestamp(float(_last_ts_vg), tz=_dt_pd.timezone.utc).date()
+            _yest_d_vg = _today_d_vg - _dt_pd.timedelta(days=1)
+            _prev_vg = [c for c in candles_5m if _dt_pd.datetime.fromtimestamp(float(c.get('ts') or c.get('timestamp') or c.get('t') or 0), tz=_dt_pd.timezone.utc).date() == _yest_d_vg]
+        else:
+            _prev_vg = []
+        if _prev_vg and len(_prev_vg) > 5:
+            _ph_vg = max(c.get('high', 0) for c in _prev_vg)
+            _pl_vg = min(c.get('low', float('inf')) for c in _prev_vg)
+            logger.debug("VixGreeks PD Zone using PDH=%.2f PDL=%.2f", _ph_vg, _pl_vg)
+        else:
+            # Fallback: approx yesterday session (5m NSE session ≈ 75 bars)
+            _n_vg = len(candles_5m)
+            _fb_vg = candles_5m[max(0, _n_vg - 150):max(0, _n_vg - 75)] or candles_5m[-75:]
+            _ph_vg = max(c.get('high', 0) for c in _fb_vg)
+            _pl_vg = min(c.get('low', float('inf')) for c in _fb_vg)
+            logger.debug("VixGreeks PD Zone fallback session range")
         _range_vg = _ph_vg - _pl_vg
         if _range_vg > 0:
             _eq_vg = _pl_vg + (_range_vg * 0.5)

@@ -280,9 +280,25 @@ class ConfluenceOptionsAlgo:
                     ce_delta = ce_theta = ce_gamma = None
                 # ICT Premium/Discount Zone — CE entry must be in discount zone
                 try:
-                    _recent = candles_5m[-100:] if len(candles_5m) >= 100 else candles_5m
-                    _ph = max(float(c["high"] if isinstance(c, dict) else c.high) for c in _recent)
-                    _pl = min(float(c["low"] if isinstance(c, dict) else c.low) for c in _recent)
+                    import datetime as _dt2
+                    _last_ts = candles_5m[-1].get('ts') or candles_5m[-1].get('timestamp') or candles_5m[-1].get('t') if isinstance(candles_5m[-1], dict) else None
+                    if _last_ts:
+                        _today_d = _dt2.datetime.fromtimestamp(float(_last_ts), tz=_dt2.timezone.utc).date()
+                        _yest_d = _today_d - _dt2.timedelta(days=1)
+                        _prev_c = [c for c in candles_5m if _dt2.datetime.fromtimestamp(float(c.get('ts') or c.get('timestamp') or c.get('t') or 0), tz=_dt2.timezone.utc).date() == _yest_d]
+                    else:
+                        _prev_c = []
+                    if _prev_c and len(_prev_c) > 5:
+                        _ph = max(float(c["high"] if isinstance(c, dict) else c.high) for c in _prev_c)
+                        _pl = min(float(c["low"] if isinstance(c, dict) else c.low) for c in _prev_c)
+                        logger.debug("ConfluenceOptions CE: PD Zone using PDH=%.2f PDL=%.2f", _ph, _pl)
+                    else:
+                        # Fallback: approx yesterday session (5m NSE session ≈ 75 bars)
+                        _n = len(candles_5m)
+                        _fb = candles_5m[max(0, _n - 150):max(0, _n - 75)] or candles_5m[-75:]
+                        _ph = max(float(c["high"] if isinstance(c, dict) else c.high) for c in _fb)
+                        _pl = min(float(c["low"] if isinstance(c, dict) else c.low) for c in _fb)
+                        logger.debug("ConfluenceOptions CE: PD Zone fallback session range")
                     _range = _ph - _pl
                     if _range > 0:
                         _eq = _pl + (_range * 0.5)
@@ -344,9 +360,25 @@ class ConfluenceOptionsAlgo:
                     pe_delta = pe_theta = pe_gamma = None
                 # ICT Premium/Discount Zone — PE entry must be in premium zone
                 try:
-                    _recent = candles_5m[-100:] if len(candles_5m) >= 100 else candles_5m
-                    _ph = max(float(c["high"] if isinstance(c, dict) else c.high) for c in _recent)
-                    _pl = min(float(c["low"] if isinstance(c, dict) else c.low) for c in _recent)
+                    import datetime as _dt2
+                    _last_ts = candles_5m[-1].get('ts') or candles_5m[-1].get('timestamp') or candles_5m[-1].get('t') if isinstance(candles_5m[-1], dict) else None
+                    if _last_ts:
+                        _today_d = _dt2.datetime.fromtimestamp(float(_last_ts), tz=_dt2.timezone.utc).date()
+                        _yest_d = _today_d - _dt2.timedelta(days=1)
+                        _prev_c = [c for c in candles_5m if _dt2.datetime.fromtimestamp(float(c.get('ts') or c.get('timestamp') or c.get('t') or 0), tz=_dt2.timezone.utc).date() == _yest_d]
+                    else:
+                        _prev_c = []
+                    if _prev_c and len(_prev_c) > 5:
+                        _ph = max(float(c["high"] if isinstance(c, dict) else c.high) for c in _prev_c)
+                        _pl = min(float(c["low"] if isinstance(c, dict) else c.low) for c in _prev_c)
+                        logger.debug("ConfluenceOptions PE: PD Zone using PDH=%.2f PDL=%.2f", _ph, _pl)
+                    else:
+                        # Fallback: approx yesterday session (5m NSE session ≈ 75 bars)
+                        _n = len(candles_5m)
+                        _fb = candles_5m[max(0, _n - 150):max(0, _n - 75)] or candles_5m[-75:]
+                        _ph = max(float(c["high"] if isinstance(c, dict) else c.high) for c in _fb)
+                        _pl = min(float(c["low"] if isinstance(c, dict) else c.low) for c in _fb)
+                        logger.debug("ConfluenceOptions PE: PD Zone fallback session range")
                     _range = _ph - _pl
                     if _range > 0:
                         _eq = _pl + (_range * 0.5)
