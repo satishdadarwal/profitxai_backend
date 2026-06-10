@@ -655,3 +655,106 @@ def poll_gtt_order_status(self):
                                 order.id, pnl)
         except Exception as e:
             logger.error("GTT poll error | order=%s | %s", order.id, e)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# sync_manual_exits
+# Fyers open positions se compare karke manually closed orders detect karo
+# ─────────────────────────────────────────────────────────────────────────────
+
+@shared_task(name="brokers.sync_manual_exits", bind=True, max_retries=1)
+def sync_manual_exits(self):
+    """
+    Fyers open positions se compare karke manually closed orders detect karo.
+    Agar Order.status=open but Fyers mein position nahi → manually exit hua.
+    """
+    from apps.orders.models import Order
+    from apps.brokers.models import BrokerAccount
+    from apps.brokers.utils import get_adapter_for_account
+    from decimal import Decimal
+    from collections import defaultdict
+    from datetime import datetime
+    from fyers_apiv3 import fyersModel
+
+    open_orders = Order.objects.filter(
+        status='open',
+        broker='fyers',
+        mode='live',
+    ).select_related('user')
+
+    if not open_orders.exists():
+        return
+
+    user_orders = defaultdict(list)
+    for o in open_orders:
+        user_orders[o.user_id].append(o)
+
+    for user_id, orders in user_orders.items():
+        try:
+            user = orders[0].user
+            account = BrokerAccount.objects.filter(
+                user=user, broker='fyers', is_active=True
+            ).first()
+            if not account:
+                continue
+
+            fyers = fyersModel.FyersModel(
+                client_id=account.app_id,
+                token=account.access_token,
+                is_async=False, log_path='',
+            )
+
+            # Open positions from Fyers
+            pos_resp = fyers.positions()
+            positions = pos_resp.get('netPositions', []) if pos_resp.get('s') == 'ok' else []
+            open_syms = {p.get('symbol', '') for p in positions if float(p.get('netQty', 0)) != 0}
+
+            # Tradebook sorted by time for FIFO matching
+            tb_resp = fyers.tradebook()
+            trades = tb_resp.get('tradeBook', []) if tb_resp.get('s') == 'ok' else []
+
+            def parse_dt(t):
+                try:
+                    return datetime.strptime(t.get('orderDateTime', ''), '%d-%b-%Y %H:%M:%S')
+                except Exception:
+                    return datetime.min
+
+            trades.sort(key=parse_dt)
+            sell_trades = [t for t in trades if int(t.get('side', 1)) == -1]
+
+            for order in orders:
+                sym = order.symbol_display or ''
+                if not sym or sym in open_syms:
+                    continue
+
+                # Position gone — find exit price from tradebook (SELL side)
+                exit_trade = next(
+                    (t for t in sell_trades if t.get('symbol', '') == sym),
+                    None,
+                )
+                if exit_trade:
+                    exit_p = float(exit_trade.get('tradePrice', 0))
+                    entry = float(order.avg_fill_price or 0)
+                    qty = float(order.quantity or 0)
+                    if exit_p > 0 and entry > 0 and qty > 0:
+                        pnl = Decimal(str(round((exit_p - entry) * qty, 2)))
+                        order.realized_pnl = pnl
+                        order.exit_price = Decimal(str(exit_p))
+                        order.status = 'closed'
+                        order.save(update_fields=[
+                            'realized_pnl', 'exit_price', 'status', 'updated_at'
+                        ])
+                        logger.info(
+                            "Manual exit detected | order=%s | sym=%s | pnl=%s",
+                            order.id, sym, pnl,
+                        )
+                else:
+                    # Position gone, no tradebook match (expired / SL hit outside tradebook)
+                    order.status = 'closed'
+                    order.save(update_fields=['status', 'updated_at'])
+                    logger.info(
+                        "Position gone, no tradebook match | order=%s | sym=%s",
+                        order.id, sym,
+                    )
+        except Exception as e:
+            logger.error("sync_manual_exits error | user=%s | %s", user_id, e)

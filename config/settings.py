@@ -277,6 +277,11 @@ CELERY_BEAT_SCHEDULE = {
         "task": "brokers.poll_gtt_order_status",
         "schedule": crontab(minute="*/5"),
     },
+    # ── Manual exit detection (position gone from Fyers) ────
+    "sync-manual-exits": {
+        "task": "brokers.sync_manual_exits",
+        "schedule": crontab(minute="*/3"),
+    },
 }
 
 
