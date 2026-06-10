@@ -272,6 +272,11 @@ CELERY_BEAT_SCHEDULE = {
         "schedule": 3600,
         "options": {"queue": "default"},
     },
+    # ── GTT exit detection → Order.realized_pnl sync ────────
+    "poll-gtt-order-status": {
+        "task": "brokers.poll_gtt_order_status",
+        "schedule": crontab(minute="*/5"),
+    },
 }
 
 

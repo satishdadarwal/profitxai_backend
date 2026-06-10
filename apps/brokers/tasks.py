@@ -598,3 +598,60 @@ def _send_refresh_token_rotation_alert(
         )
     logger.warning(msg)
     _send_urgent_admin_alert(msg)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# poll_gtt_order_status
+# GTT triggered orders detect karke Order.realized_pnl update karo
+# ─────────────────────────────────────────────────────────────────────────────
+
+@shared_task(name="brokers.poll_gtt_order_status", bind=True, max_retries=1)
+def poll_gtt_order_status(self):
+    """GTT triggered orders detect karke Order.realized_pnl update karo"""
+    from apps.orders.models import Order
+
+    open_orders = Order.objects.filter(
+        status='open',
+        broker='fyers',
+    ).select_related('user__trading_profile')
+
+    for order in open_orders:
+        try:
+            profile = getattr(order.user, 'trading_profile', None)
+            if not profile:
+                continue
+            exit_mode = getattr(profile, 'exit_mode', None)
+            if exit_mode not in ('gtt_oco', 'both'):
+                continue
+
+            from apps.brokers.utils import get_broker_adapter
+            adapter = get_broker_adapter(order.user, 'fyers')
+            if not adapter:
+                continue
+
+            trades = adapter.get_tradebook() or []
+            sym = order.symbol_display or ''
+
+            exit_trade = next((
+                t for t in trades
+                if t.get('symbol', '') == sym
+                and int(t.get('side', 0)) == -1
+            ), None)
+
+            if exit_trade:
+                exit_p = float(exit_trade.get('tradePrice', 0))
+                entry = float(order.avg_fill_price or 0)
+                qty = float(order.quantity or 0)
+                if exit_p > 0 and entry > 0 and qty > 0:
+                    from decimal import Decimal
+                    pnl = Decimal(str(round((exit_p - entry) * qty, 2)))
+                    order.realized_pnl = pnl
+                    order.status = 'closed'
+                    order.exit_price = Decimal(str(exit_p))
+                    order.save(update_fields=[
+                        'realized_pnl', 'status', 'exit_price', 'updated_at'
+                    ])
+                    logger.info("GTT exit detected | order=%s | pnl=%s",
+                                order.id, pnl)
+        except Exception as e:
+            logger.error("GTT poll error | order=%s | %s", order.id, e)

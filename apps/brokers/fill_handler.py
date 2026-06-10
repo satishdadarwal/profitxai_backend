@@ -398,6 +398,30 @@ def process_broker_fill(
                     broker_order.avg_fill_price = fill_price
                     broker_order.save(update_fields=["realized_pnl", "avg_fill_price"])
 
+                # ── Order model pe realized_pnl sync karo ──
+                try:
+                    from apps.orders.models import Order
+                    linked_order = Order.objects.filter(
+                        exchange_order_id=broker_order.exchange_order_id
+                    ).first()
+                    if linked_order and fill_price and fill_qty:
+                        entry = float(linked_order.avg_fill_price or 0)
+                        exit_p = float(fill_price)
+                        qty = float(fill_qty)
+                        if entry > 0 and exit_p > 0 and qty > 0:
+                            from decimal import Decimal
+                            pnl = Decimal(str(round((exit_p - entry) * qty, 2)))
+                            linked_order.realized_pnl = pnl
+                            linked_order.status = 'closed'
+                            linked_order.exit_price = Decimal(str(exit_p))
+                            linked_order.save(update_fields=[
+                                'realized_pnl', 'status', 'exit_price', 'updated_at'
+                            ])
+                            logger.info("Order pnl synced | order=%s | pnl=%s",
+                                        linked_order.id, pnl)
+                except Exception as e:
+                    logger.error("Order pnl sync error | %s", e)
+
             except InvalidOrderError as e:
                 logger.error(
                     "fill_order failed | order=%s | %s", order.id, e
