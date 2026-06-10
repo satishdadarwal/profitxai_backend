@@ -888,6 +888,24 @@ def sync_fyers_tradebook(self):
                 instr = "perp" if is_crypto else "options" if opt else "equity"
                 broker_slug = "delta" if is_crypto else "fyers"
 
+                # Strategy matching — find strategy whose symbols include this underlying
+                matched_strategy = None
+                if u_sym:
+                    from apps.strategies.models import Strategy as _Strat, UserStrategyPreference as _Pref
+                    try:
+                        pref_qs = _Pref.objects.filter(
+                            user=account.user,
+                            preferred_mode="live",
+                        ).select_related("strategy")
+                        for pref in pref_qs:
+                            s = pref.strategy
+                            syms = s.symbols or []
+                            if u_sym in syms or (s.symbol and u_sym in s.symbol.upper()):
+                                matched_strategy = s
+                                break
+                    except Exception:
+                        pass
+
                 Order.objects.create(
                     user=account.user,
                     asset=asset,
@@ -905,6 +923,7 @@ def sync_fyers_tradebook(self):
                     instrument_type=instr,
                     option_type=opt,
                     lots=lots_val,
+                    strategy=matched_strategy,
                     tags=[],
                     emoji_reaction="",
                     journal_notes="",

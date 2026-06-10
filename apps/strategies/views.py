@@ -751,13 +751,26 @@ class StrategyActivityLogView(APIView):
                 continue
 
             # Order model is single source of truth — paper and live both
+            # Fallback: also match by notes/symbol for orders created without strategy FK
+            _syms = getattr(strategy, 'symbols', None) or []
+            _sym_single = getattr(strategy, 'symbol', '') or ''
+            sym_q = Q()
+            for _s in _syms:
+                if _s:
+                    sym_q |= Q(notes__icontains=_s)
+            if _sym_single:
+                sym_q |= Q(notes__icontains=_sym_single)
+
             order_qs = _OrderModel.objects.filter(
-                strategy_id=strategy.id,
                 user=request.user,
                 mode=effective_mode,
+            ).filter(
+                Q(strategy_id=strategy.id) | (Q(strategy__isnull=True) & sym_q)
             ).select_related("asset")
             if today_start:
-                order_qs = order_qs.filter(created_at__gte=today_start)
+                order_qs = order_qs.filter(
+                    Q(created_at__gte=today_start) | Q(updated_at__gte=today_start)
+                )
             all_trades = list(order_qs.order_by("-created_at"))
 
             all_trades.sort(
