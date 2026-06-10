@@ -17,7 +17,11 @@ class OrderSerializer(serializers.ModelSerializer):
             'quantity', 'filled_qty', 'remaining_qty', 'limit_price',
             'stop_price', 'avg_fill_price', 'sl_price', 'target_price',
             'exchange_order_id', 'execution_status', 'broker_response',
-            'rejection_reason', 'notes', 'created_at', 'updated_at'
+            'rejection_reason', 'notes',
+            'entry_price', 'exit_price', 'realized_pnl', 'unrealized_pnl',
+            'current_price', 'entry_time', 'exit_time', 'exit_reason',
+            'position_size',
+            'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'user', 'created_at', 'updated_at', 'remaining_qty']
 

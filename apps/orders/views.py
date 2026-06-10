@@ -34,7 +34,7 @@ class OrderViewSet(viewsets.ModelViewSet):
     def update_journal(self, request, pk=None):
         """PATCH /api/v1/orders/orders/{id}/update_journal/ — notes/tags/emoji save"""
         order = self.get_object()
-        meta = order.broker_response or {}
+
         if 'notes' in request.data:
             order.journal_notes = request.data['notes']
         if 'tags' in request.data:
@@ -111,24 +111,7 @@ class TradeViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['patch'])
     def update_journal(self, request, pk=None):
-        """PATCH /api/v1/orders/orders/{id}/update_journal/ — notes/tags/emoji save"""
-        order = self.get_object()
-        meta = order.broker_response or {}
-        if 'notes' in request.data:
-            order.journal_notes = request.data['notes']
-        if 'tags' in request.data:
-            order.tags = request.data['tags']
-        if 'emoji_reaction' in request.data:
-            order.emoji_reaction = request.data['emoji_reaction']
-        order.save(update_fields=['journal_notes', 'tags', 'emoji_reaction', 'updated_at'])
-        return Response({"status": "ok", "id": str(order.id)})
-    
-    @action(detail=True, methods=['patch'])
-    def update_journal(self, request, pk=None):
-        """
-        PATCH /api/trades/{id}/update_journal/
-        Update notes, tags, emoji_reaction only
-        """
+        """PATCH /api/trades/{id}/update_journal/ — update notes, tags, emoji_reaction"""
         trade = self.get_object()
         serializer = TradeUpdateSerializer(trade, data=request.data, partial=True)
         
@@ -198,7 +181,7 @@ class TradeJournalEntryViewSet(viewsets.ModelViewSet):
     def update_journal(self, request, pk=None):
         """PATCH /api/v1/orders/orders/{id}/update_journal/ — notes/tags/emoji save"""
         order = self.get_object()
-        meta = order.broker_response or {}
+
         if 'notes' in request.data:
             order.journal_notes = request.data['notes']
         if 'tags' in request.data:
@@ -219,72 +202,42 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from collections import defaultdict
 
-from .models import Trade, Order
-from apps.options.models import OptionTrade
+from .models import Order
 
 
 class CalendarPerformanceView(APIView):
     """
     GET /api/trades/calendar-performance/?year=2025&month=4&market_type=all
-    
+
     Returns daily aggregated performance for calendar visualization.
-    Combines data from Trade (unified) and OptionTrade models.
+    Queries the centralised Order model (populated via migrate_to_orders).
     """
     permission_classes = [IsAuthenticated]
-    
+
     def get(self, request):
         user = request.user
         year = int(request.query_params.get('year', datetime.now().year))
         month = int(request.query_params.get('month', datetime.now().month))
-        market_type = request.query_params.get('market_type', 'all')  # 'all', 'indian', 'crypto'
-        
-        # Date range for the month
-        start_date = datetime(year, month, 1)
+        market_type = request.query_params.get('market_type', 'all')
+
+        start_date = datetime(year, month, 1).date()
         if month == 12:
-            end_date = datetime(year + 1, 1, 1)
+            end_date = datetime(year + 1, 1, 1).date()
         else:
-            end_date = datetime(year, month + 1, 1)
-        
-        from django.utils import timezone
-        # timezone-aware dates
-        import pytz
-        tz = pytz.UTC
-        start_dt = tz.localize(start_date)
-        end_dt = tz.localize(end_date)
+            end_date = datetime(year, month + 1, 1).date()
 
-        # Query unified trades
-        trades_query = Trade.objects.filter(
+        qs = Order.objects.filter(
             user=user,
-            created_at__gte=start_dt,
-            created_at__lt=end_dt,
-        )
-        if market_type != 'all':
-            trades_query = trades_query.filter(market_type=market_type)
-
-        # Query option trades (Indian market)
-        option_trades_query = OptionTrade.objects.filter(
-            user=user,
-            entry_time__gte=start_dt,
-            entry_time__lt=end_dt,
             status='closed',
+            exit_time__date__gte=start_date,
+            exit_time__date__lt=end_date,
+            realized_pnl__isnull=False,
         )
+        if market_type == 'live':
+            qs = qs.filter(mode='live')
+        elif market_type == 'paper':
+            qs = qs.filter(mode='paper')
 
-        # Query live Order model — sell orders with net_pnl
-        order_query = Order.objects.filter(
-            user=user,
-            mode='live',
-            side='sell',
-            execution_status='filled',
-            created_at__gte=start_dt,
-            created_at__lt=end_dt,
-        ).exclude(exchange_order_id='').exclude(exchange_order_id__isnull=True).exclude(notes__startswith='strategy=')
-
-        if market_type == 'indian':
-            order_query = order_query.exclude(broker='delta')
-        elif market_type == 'crypto':
-            order_query = order_query.filter(broker='delta')
-        
-        # Aggregate trades by day
         daily_data = defaultdict(lambda: {
             'date': None,
             'pnl': 0,
@@ -295,100 +248,37 @@ class CalendarPerformanceView(APIView):
             'win_rate': 0,
             'avg_pnl': 0,
         })
-        
-        # Process unified trades
-        for trade in trades_query:
-            date_key = trade.created_at.date().isoformat()
-            
-            if trade.realized_pnl is not None:
-                pnl = float(trade.realized_pnl) - float(trade.fee or 0)
-                daily_data[date_key]['date'] = date_key
-                daily_data[date_key]['pnl'] += pnl
-                daily_data[date_key]['trades'] += 1
-                
-                if pnl > 0:
-                    daily_data[date_key]['wins'] += 1
-                elif pnl < 0:
-                    daily_data[date_key]['losses'] += 1
-                else:
-                    daily_data[date_key]['breakeven'] += 1
-        
-        # Process option trades (only if market_type is 'all' or 'indian')
-        if market_type in ['all', 'indian']:
-            for trade in option_trades_query:
-                date_key = trade.entry_time.date().isoformat()
-                
-                if trade.pnl is not None:
-                    pnl = float(trade.pnl)
-                    daily_data[date_key]['date'] = date_key
-                    daily_data[date_key]['pnl'] += pnl
-                    daily_data[date_key]['trades'] += 1
-                    
-                    if pnl > 0:
-                        daily_data[date_key]['wins'] += 1
-                    elif pnl < 0:
-                        daily_data[date_key]['losses'] += 1
-                    else:
-                        daily_data[date_key]['breakeven'] += 1
-        
-        # Process live Order sell trades — buy/sell match for P&L
-        from collections import defaultdict as _dd
-        buy_orders = Order.objects.filter(
-            user=user, mode='live', side='buy', execution_status='filled',
-            created_at__gte=start_dt, created_at__lt=end_dt,
-        ).exclude(exchange_order_id='').exclude(exchange_order_id__isnull=True).exclude(notes__startswith='strategy=')
 
-        buy_map = _dd(list)
-        for b in buy_orders:
-            sym = b.symbol_display or b.notes or ''
-            buy_map[sym].append(float(b.avg_fill_price or 0))
+        for order in qs:
+            date_key = order.exit_time.date().isoformat()
+            pnl = float(order.realized_pnl)
+            daily_data[date_key]['date'] = date_key
+            daily_data[date_key]['pnl'] += pnl
+            daily_data[date_key]['trades'] += 1
+            if pnl > 0:
+                daily_data[date_key]['wins'] += 1
+            elif pnl < 0:
+                daily_data[date_key]['losses'] += 1
+            else:
+                daily_data[date_key]['breakeven'] += 1
 
-        for order in order_query:
-            sym = order.symbol_display or order.notes or ''
-            sell_price = float(order.avg_fill_price or 0)
-            qty = float(order.quantity or 0)
-            buy_prices = buy_map.get(sym, [])
-            buy_price = buy_prices.pop(0) if buy_prices else 0
-            if buy_price > 0 and sell_price > 0:
-                pnl = round((sell_price - buy_price) * qty, 2)
-                date_key = order.created_at.astimezone(pytz.UTC).date().isoformat()
-                daily_data[date_key]['date'] = date_key
-                daily_data[date_key]['pnl'] += pnl
-                daily_data[date_key]['trades'] += 1
-                if pnl > 0:
-                    daily_data[date_key]['wins'] += 1
-                elif pnl < 0:
-                    daily_data[date_key]['losses'] += 1
-
-        # Calculate win_rate and avg_pnl for each day
-        for date_key, data in daily_data.items():
+        for data in daily_data.values():
             total = data['trades']
             if total > 0:
                 data['win_rate'] = round((data['wins'] / total) * 100, 2)
                 data['avg_pnl'] = round(data['pnl'] / total, 2)
-        
-        # Convert to sorted list
-        calendar_data = sorted(
-            daily_data.values(),
-            key=lambda x: x['date']
-        )
-        
-        # Calculate month summary
+
+        calendar_data = sorted(daily_data.values(), key=lambda x: x['date'])
+
         total_pnl = sum(day['pnl'] for day in calendar_data)
         total_trades = sum(day['trades'] for day in calendar_data)
         total_wins = sum(day['wins'] for day in calendar_data)
         total_losses = sum(day['losses'] for day in calendar_data)
-        
-        # Find best and worst days
         profitable_days = [d for d in calendar_data if d['pnl'] > 0]
         losing_days = [d for d in calendar_data if d['pnl'] < 0]
-        
         best_day = max(calendar_data, key=lambda x: x['pnl']) if calendar_data else None
         worst_day = min(calendar_data, key=lambda x: x['pnl']) if calendar_data else None
-        
-        # Calculate streak
-        current_streak = self._calculate_streak(calendar_data)
-        
+
         return Response({
             'year': year,
             'month': month,
@@ -405,25 +295,19 @@ class CalendarPerformanceView(APIView):
                 'breakeven_days': len([d for d in calendar_data if d['pnl'] == 0 and d['trades'] > 0]),
                 'best_day': best_day,
                 'worst_day': worst_day,
-                'current_streak': current_streak,
+                'current_streak': self._calculate_streak(calendar_data),
             }
         })
-    
+
     def _calculate_streak(self, calendar_data):
-        """Calculate current winning/losing streak"""
         if not calendar_data:
             return {'type': 'none', 'count': 0}
-        
-        # Sort by date descending
         sorted_days = sorted(calendar_data, key=lambda x: x['date'], reverse=True)
-        
         streak_type = None
         streak_count = 0
-        
         for day in sorted_days:
             if day['trades'] == 0:
                 continue
-                
             if day['pnl'] > 0:
                 if streak_type is None:
                     streak_type = 'winning'
@@ -440,11 +324,7 @@ class CalendarPerformanceView(APIView):
                     streak_count += 1
                 else:
                     break
-        
-        return {
-            'type': streak_type or 'none',
-            'count': streak_count
-        }
+        return {'type': streak_type or 'none', 'count': streak_count}
 # apps/orders/views.py
 # ADD THIS - Export CSV/PDF Functionality
 
@@ -971,14 +851,13 @@ class DailyPnlView(APIView):
 
     def get(self, request):
         from django.utils import timezone
-        from .models import DailyPnlSnapshot, Trade, Position
+        from .models import DailyPnlSnapshot, Position
         today = timezone.now().date()
         mode = request.query_params.get('mode', 'live')
         market_type = request.query_params.get('market_type', 'all')
         date_str = request.query_params.get('date', None)
         target_date = timezone.datetime.strptime(date_str, '%Y-%m-%d').date() if date_str else today
 
-        # Snapshot se serve karo agar available
         snap = DailyPnlSnapshot.objects.filter(
             user=request.user, date=target_date, mode=mode
         ).first()
@@ -995,24 +874,25 @@ class DailyPnlView(APIView):
                 'source': 'snapshot',
             })
 
-        # Snapshot nahi hai — live calculate karo (today only)
-        trades_qs = Trade.objects.filter(user=request.user, created_at__date=target_date)
+        orders_qs = Order.objects.filter(
+            user=request.user,
+            status='closed',
+            exit_time__date=target_date,
+            realized_pnl__isnull=False,
+        )
         if mode != 'all':
-            trades_qs = trades_qs.filter(mode=mode)
-        if market_type != 'all':
-            trades_qs = trades_qs.filter(market_type=market_type)
+            orders_qs = orders_qs.filter(mode=mode)
 
         realised = 0.0
-        fees = 0.0
         wins = 0
         losses = 0
-        for t in trades_qs:
-            pnl = float(t.realized_pnl or 0)
-            fee = float(t.fee or 0)
-            realised += pnl - fee
-            fees += fee
-            if pnl > 0: wins += 1
-            elif pnl < 0: losses += 1
+        for o in orders_qs:
+            pnl = float(o.realized_pnl)
+            realised += pnl
+            if pnl > 0:
+                wins += 1
+            elif pnl < 0:
+                losses += 1
 
         pos_qs = Position.objects.filter(user=request.user, status='open')
         if mode != 'all':
@@ -1025,8 +905,8 @@ class DailyPnlView(APIView):
             'market_type': market_type,
             'realised': round(realised, 2),
             'unrealised': round(unrealised, 2),
-            'fees': round(fees, 2),
-            'total_trades': trades_qs.count(),
+            'fees': 0.0,
+            'total_trades': orders_qs.count(),
             'wins': wins,
             'losses': losses,
             'source': 'live',

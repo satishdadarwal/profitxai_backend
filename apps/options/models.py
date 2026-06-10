@@ -62,6 +62,8 @@ class OptionTrade(models.Model):
     Links to Strategy for algo trades, BrokerOrder for execution tracking.
     Now supports notes, tags, and emoji reactions for journal features.
     """
+    # DEPRECATED: Use apps.orders.models.Order instead
+    # Safe to delete after: all queries migrated to Order model
     
     PAPER = "paper"
     LIVE = "live"

@@ -414,6 +414,8 @@ class PaperTopUp(models.Model):
 # 📊 PAPER TRADE MODEL
 # ─────────────────────────────────────────────
 class PaperTrade(models.Model):
+    # DEPRECATED: Use apps.orders.models.Order instead
+    # Safe to delete after: all queries migrated to Order model
 
     class AssetType(models.TextChoices):
         OPTION = "option", "Option"

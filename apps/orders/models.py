@@ -133,6 +133,17 @@ class Order(models.Model):
     emoji_reaction = models.CharField(max_length=10, blank=True, default="")
     journal_notes = models.TextField(blank=True, default="")
 
+    # ── Trade tracking fields ─────────────────────────────────────
+    entry_price = models.DecimalField(max_digits=16, decimal_places=6, null=True, blank=True)
+    exit_price = models.DecimalField(max_digits=16, decimal_places=6, null=True, blank=True)
+    realized_pnl = models.DecimalField(max_digits=16, decimal_places=6, null=True, blank=True)
+    unrealized_pnl = models.DecimalField(max_digits=16, decimal_places=6, null=True, blank=True)
+    current_price = models.DecimalField(max_digits=16, decimal_places=6, null=True, blank=True)
+    entry_time = models.DateTimeField(null=True, blank=True)
+    exit_time = models.DateTimeField(null=True, blank=True)
+    exit_reason = models.CharField(max_length=50, blank=True, default='')
+    position_size = models.IntegerField(null=True, blank=True)
+
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
 
