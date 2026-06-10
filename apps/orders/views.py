@@ -1,12 +1,16 @@
 # apps/orders/views.py
 # UPDATED VERSION - WITH TAG FILTERING AND JOURNAL FEATURES
 
+import logging
+
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.db.models import Q
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 from .models import Order, Trade, TradeJournalEntry
 from .serializers import (
@@ -229,9 +233,9 @@ class CalendarPerformanceView(APIView):
         qs = Order.objects.filter(
             user=user,
             status='closed',
-            exit_time__date__gte=start_date,
-            exit_time__date__lt=end_date,
-            realized_pnl__isnull=False,
+        ).filter(
+            Q(exit_time__date__gte=start_date, exit_time__date__lt=end_date) |
+            Q(exit_time__isnull=True, updated_at__date__gte=start_date, updated_at__date__lt=end_date)
         )
         if market_type == 'live':
             qs = qs.filter(mode='live')
@@ -250,8 +254,8 @@ class CalendarPerformanceView(APIView):
         })
 
         for order in qs:
-            date_key = order.exit_time.date().isoformat()
-            pnl = float(order.realized_pnl)
+            date_key = (order.exit_time or order.updated_at).date().isoformat()
+            pnl = float(order.realized_pnl or 0)
             daily_data[date_key]['date'] = date_key
             daily_data[date_key]['pnl'] += pnl
             daily_data[date_key]['trades'] += 1
@@ -857,8 +861,9 @@ class DailyPnlView(APIView):
         orders_qs = Order.objects.filter(
             user=request.user,
             status='closed',
-            exit_time__date=target_date,
-            realized_pnl__isnull=False,
+        ).filter(
+            Q(exit_time__date=target_date) |
+            Q(exit_time__isnull=True, updated_at__date=target_date)
         )
         if mode != 'all':
             orders_qs = orders_qs.filter(mode=mode)
@@ -867,22 +872,51 @@ class DailyPnlView(APIView):
         wins = 0
         losses = 0
         for o in orders_qs:
-            pnl = float(o.realized_pnl)
+            pnl = float(o.realized_pnl or 0)
             realised += pnl
             if pnl > 0:
                 wins += 1
             elif pnl < 0:
                 losses += 1
 
-        pos_qs = Position.objects.filter(user=request.user, status='open')
-        if mode != 'all':
-            pos_qs = pos_qs.filter(mode=mode)
-        unrealised = sum(float(p.unrealized_pnl or 0) for p in pos_qs)
+        # Unrealized PnL — live from Fyers positions API
+        unrealised = 0.0
+        try:
+            from apps.brokers.models import BrokerAccount
+            from fyers_apiv3 import fyersModel
+            account = BrokerAccount.objects.filter(
+                user=request.user, broker='fyers', is_active=True
+            ).first()
+            if account:
+                fyers = fyersModel.FyersModel(
+                    client_id=account.app_id,
+                    token=account.access_token,
+                    is_async=False, log_path='',
+                )
+                pos_resp = fyers.positions()
+                if pos_resp.get('s') == 'ok':
+                    for pos in pos_resp.get('netPositions', []):
+                        net_qty = float(pos.get('netQty', 0))
+                        if net_qty != 0:
+                            buy_avg = float(pos.get('buyAvg', 0))
+                            sell_avg = float(pos.get('sellAvg', 0))
+                            ltp = float(pos.get('ltp', 0))
+                            qty = abs(net_qty)
+                            if net_qty > 0:
+                                unrealised += (ltp - buy_avg) * qty
+                            else:
+                                unrealised += (sell_avg - ltp) * qty
+        except Exception as e:
+            logger.error("Unrealized PnL fetch error | %s", e)
 
         return Response({
             'date': str(target_date),
             'mode': mode,
             'market_type': market_type,
+            'realized_pnl': round(realised, 2),
+            'unrealized_pnl': round(unrealised, 2),
+            'total_pnl': round(realised + unrealised, 2),
+            # keep legacy keys so existing Flutter code doesn't break
             'realised': round(realised, 2),
             'unrealised': round(unrealised, 2),
             'fees': 0.0,
