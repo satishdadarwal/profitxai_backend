@@ -25,16 +25,14 @@ from apps.options.models import (
     OptionContract,
     OptionSnapshot,
     OptionSymbol,
-    OptionTrade,
 )
-from apps.paper_trading.models import (
-    PaperAccount,
-    PaperAccount,
-)
+from apps.paper_trading.models import PaperAccount
+from apps.orders.models import Order
+from apps.market.models import Asset
 from apps.brokers.models import BrokerAccount, BrokerOrder
 from broker_adapters.factory import BrokerAdapterFactory
 
-from .serializers import BacktestRunSerializer, OptionTradeSerializer
+from .serializers import BacktestRunSerializer
 from .services import (
     build_option_chain,
     close_trade,
@@ -197,39 +195,45 @@ class LiveOptionTradeView(APIView):
         status_filter = request.query_params.get("status", "open")
         limit = min(int(request.query_params.get("limit", 20)), 100)
 
-        qs = OptionTrade.objects.filter(
-            user=request.user, 
-            mode="live"
-        ).select_related("symbol", "contract").order_by("-entry_time")
+        qs = Order.objects.filter(
+            user=request.user,
+            mode="live",
+            instrument_type="options",
+        ).select_related("asset").order_by("-entry_time", "-created_at")
 
         if status_filter != "all":
             qs = qs.filter(status=status_filter)
 
         trades_data = []
-        for trade in qs[:limit]:
-            contract = trade.contract
-            if not contract:
-                continue
-                
+        for order in qs[:limit]:
+            ep = float(order.entry_price or 0)
+            cp = float(order.current_price or order.entry_price or 0)
+            qty = float(order.quantity or 0)
+            side = order.side or "buy"
+
+            if side == "buy":
+                unrealized_pnl = (cp - ep) * qty
+            else:
+                unrealized_pnl = (ep - cp) * qty
+
             trades_data.append({
-                "id": trade.id,
-                "symbol": contract.option_symbol.symbol if hasattr(contract, 'option_symbol') else trade.symbol.name,
-                "strike": contract.strike,
-                "option_type": contract.option_type,
-                "trade_type": trade.action or trade.trade_type,
-                "quantity": trade.quantity,
-                "lots": trade.lots if hasattr(trade, 'lots') else trade.quantity // (trade.symbol.lot_size if trade.symbol else 50),
-                "entry_price": float(trade.entry_price),
-                "current_price": float(trade.current_price or contract.ltp or trade.entry_price),
-                "unrealized_pnl": _calculate_unrealized_pnl(trade),
-                "stop_loss": float(trade.stop_loss) if trade.stop_loss else None,
-                "target_price": float(trade.target_price or trade.take_profit) if (trade.target_price or trade.take_profit) else None,
-                "entry_time": trade.entry_time.isoformat(),
-                "exit_time": trade.exit_time.isoformat() if trade.exit_time else None,
-                "exit_price": float(trade.exit_price) if trade.exit_price else None,
-                "realized_pnl": float(trade.pnl) if trade.pnl else None,
-                "status": trade.status,
-                "broker_order_id": _get_broker_order_id(trade),
+                "id": str(order.id),
+                "symbol": order.symbol_display or (order.asset.symbol if order.asset else ""),
+                "option_type": order.option_type,
+                "trade_type": side,
+                "quantity": qty,
+                "lots": order.lots,
+                "entry_price": ep,
+                "current_price": cp,
+                "unrealized_pnl": round(unrealized_pnl, 2),
+                "stop_loss": float(order.sl_price) if order.sl_price else None,
+                "target_price": float(order.target_price) if order.target_price else None,
+                "entry_time": order.entry_time.isoformat() if order.entry_time else order.created_at.isoformat(),
+                "exit_time": order.exit_time.isoformat() if order.exit_time else None,
+                "exit_price": float(order.exit_price) if order.exit_price else None,
+                "realized_pnl": float(order.realized_pnl) if order.realized_pnl else None,
+                "status": order.status,
+                "broker_order_id": _get_broker_order_id_from_order(order),
             })
 
         return Response({
@@ -426,66 +430,70 @@ class LiveOptionTradeView(APIView):
                         "error": f"Order placement failed: {_order_message(order_response)}"
                     }, status=status.HTTP_400_BAD_REQUEST)
                 
-                # Create OptionTrade record
-                option_trade = OptionTrade.objects.create(
+                # Get or create Asset
+                symbol_str = f"{symbol_name}{int(strike)}{option_type}"
+                asset, _ = Asset.objects.get_or_create(
+                    symbol=symbol_str,
+                    defaults={
+                        "name": symbol_str,
+                        "asset_type": "options",
+                        "exchange": "NSE",
+                        "currency": "INR",
+                        "is_active": True,
+                    },
+                )
+
+                # Create Order record (canonical)
+                order_obj = Order.objects.create(
                     user=request.user,
-                    symbol=symbol,
-                    contract=option_contract,
-                    
-                    trade_type=trade_type,
-                    action=trade_type,
-                    quantity=quantity,
-                    lots=lots or (quantity // symbol.lot_size),
+                    asset=asset,
+                    mode=Order.Mode.LIVE,
+                    side=trade_type,
+                    order_type=Order.OrderType.MARKET,
+                    status=Order.Status.OPEN,
+                    quantity=Decimal(str(quantity)),
+                    filled_qty=Decimal(str(quantity)),
                     entry_price=Decimal(str(entry_price)),
                     current_price=Decimal(str(entry_price)),
-                    stop_loss=Decimal(str(stop_loss)) if stop_loss else None,
-                    take_profit=Decimal(str(target_price)) if target_price else None,
+                    sl_price=Decimal(str(stop_loss)) if stop_loss else None,
                     target_price=Decimal(str(target_price)) if target_price else None,
-                    use_trailing_sl=bool(data.get("use_trailing_sl", False)),
-                    trailing_sl_percent=Decimal(str(trailing_sl_percent)) if trailing_sl_percent else None,
-                    entry_spot=Decimal(str(spot)),
-                    mode="live",
-                    status="open",
-                    setup_type=data.get("setup_type", "Manual"),
-                    timeframe=str(data.get("timeframe", "15")),
+                    entry_time=timezone.now(),
+                    option_type=option_type,
+                    lots=lots or (quantity // symbol.lot_size),
+                    position_size=quantity,
+                    symbol_display=symbol_str,
+                    instrument_type="options",
+                    notes=data.get("setup_type", "Manual"),
                 )
-                
+
                 # Create BrokerOrder record
                 broker_order = BrokerOrder.objects.create(
-                    user=request.user,
                     broker_account=getattr(adapter, 'broker_account', None),
-                    option_trade=option_trade,
+                    order=order_obj,
                     broker_order_id=_order_id(order_response),
                     symbol=fyers_symbol,
-                    quantity=float(quantity),
-                    direction=trade_type.upper(),
+                    quantity=quantity,
                     side=trade_type,
-                    order_type=order_type.upper(),
+                    order_type=BrokerOrder.OrderType.ENTRY,
                     price=limit_price,
-                    status="PLACED",
-                    broker_name=adapter.broker_name if hasattr(adapter, 'broker_name') else "unknown",
-                    metadata={
-                        "option_type": option_type,
-                        "strike": float(strike),
-                        "expiry": expiry_date.isoformat(),
-                        "spot_at_entry": spot,
-                    }
+                    status=BrokerOrder.Status.PLACED,
+                    notes=f"option_type={option_type} | strike={strike} | expiry={expiry_date.isoformat()} | spot={spot}",
                 )
-                
+
                 logger.info(
                     "Live trade placed: user=%s, symbol=%s, strike=%s, type=%s, qty=%s, order_id=%s",
                     request.user.id, symbol_name, strike, option_type, quantity, broker_order.broker_order_id
                 )
-                
+
                 return Response({
                     "success": True,
-                    "trade_id": option_trade.id,
+                    "trade_id": str(order_obj.id),
                     "broker_order_id": broker_order.broker_order_id,
                     "symbol": fyers_symbol,
                     "strike": float(strike),
                     "option_type": option_type,
                     "quantity": quantity,
-                    "lots": option_trade.lots,
+                    "lots": order_obj.lots,
                     "entry_price": float(entry_price),
                     "stop_loss": float(stop_loss),
                     "target_price": float(target_price) if target_price else None,
@@ -510,24 +518,22 @@ class LiveOptionTradeCloseView(APIView):
     def post(self, request, trade_id):
         """
         Close a live trade
-        
+
         Body: { "exit_price": 150.0 }  (optional - uses current_price if not provided)
         """
         try:
-            trade = OptionTrade.objects.select_related(
-                "symbol", "contract"
-            ).get(id=trade_id, user=request.user, mode="live", status="open")
-        except OptionTrade.DoesNotExist:
+            order = Order.objects.get(
+                id=trade_id, user=request.user, mode="live", status="open"
+            )
+        except Order.DoesNotExist:
             return Response({
                 "error": "Live trade not found or already closed"
             }, status=status.HTTP_404_NOT_FOUND)
 
         exit_price = request.data.get("exit_price")
-        
-        # Use current_price or LTP if exit_price not provided
+
         if exit_price is None:
-            contract = trade.contract
-            exit_price = float(trade.current_price or contract.ltp or trade.entry_price)
+            exit_price = float(order.current_price or order.entry_price or 0)
         else:
             try:
                 exit_price = float(exit_price)
@@ -541,73 +547,70 @@ class LiveOptionTradeCloseView(APIView):
                 "error": "exit_price must be > 0"
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        # ── Place exit order via broker ───────────────────────────────────────
+        # Retrieve fyers_symbol from the contract if symbol_display matches
+        fyers_sym = order.symbol_display or (order.asset.symbol if order.asset else "")
+
         try:
             adapter = BrokerAdapterFactory.get_adapter(request.user)
-            
-            # Reverse direction for exit
-            exit_side = "sell" if trade.action == "buy" or trade.trade_type == "buy" else "buy"
-            contract = trade.contract
-            
+            exit_side = "sell" if order.side == "buy" else "buy"
+
             with transaction.atomic():
-                # Place exit order
                 exit_response = adapter.place_order(
-                    symbol=contract.fyers_symbol,
+                    symbol=fyers_sym,
                     side=exit_side,
-                    qty=int(trade.quantity),
+                    qty=int(order.quantity),
                     order_type="market",
                     price=0,
                     product_type="INTRADAY",
                 )
-                
+
                 if not _order_success(exit_response):
                     logger.error("Exit order failed: %s", _order_message(exit_response))
                     return Response({
-                        "error": f"Exit order failed: {exit_response.get('message', 'Unknown error')}"
+                        "error": f"Exit order failed: {_order_message(exit_response)}"
                     }, status=status.HTTP_400_BAD_REQUEST)
-                
-                # Create exit BrokerOrder record
-                exit_order = BrokerOrder.objects.create(
-                    user=request.user,
-                    broker_account=getattr(adapter, 'broker_account', None),
-                    option_trade=trade,
-                    broker_order_id=_order_id(exit_response),
-                    symbol=contract.fyers_symbol,
-                    quantity=float(trade.quantity),
-                    direction=exit_side.upper(),
-                    side=exit_side,
-                    order_type="MARKET",
-                    price=exit_price,
-                    status="PLACED",
-                    broker_name=adapter.broker_name if hasattr(adapter, 'broker_name') else "unknown",
-                    metadata={
-                        "order_purpose": "manual_exit",
-                        "exit_reason": "Manual",
-                    }
-                )
-                
-                # Close trade in database
-                pnl = close_trade(trade, exit_price, "Manual")
-                
+
+                broker_account = getattr(adapter, 'broker_account', None)
+                if broker_account:
+                    exit_broker_order = BrokerOrder.objects.create(
+                        broker_account=broker_account,
+                        order=order,
+                        broker_order_id=_order_id(exit_response) or "",
+                        symbol=fyers_sym,
+                        quantity=int(order.quantity),
+                        side=exit_side,
+                        order_type=BrokerOrder.OrderType.EXIT,
+                        price=Decimal(str(exit_price)),
+                        status=BrokerOrder.Status.PLACED,
+                        notes="manual_exit",
+                    )
+                    exit_order_id = exit_broker_order.broker_order_id
+                else:
+                    exit_order_id = _order_id(exit_response) or ""
+
+                # Close Order in DB
+                result = close_trade(order, exit_price, "Manual")
+                pnl = result.get("realized_pnl", 0) if isinstance(result, dict) else float(result)
+
                 logger.info(
-                    "Live trade closed: trade_id=%s, exit_price=%s, pnl=%s, order_id=%s",
-                    trade_id, exit_price, pnl, exit_order.broker_order_id
+                    "Live trade closed: trade_id=%s, exit_price=%s, pnl=%s",
+                    trade_id, exit_price, pnl
                 )
-                
+
                 return Response({
                     "success": True,
                     "message": "Trade closed successfully",
                     "trade_id": str(trade_id),
                     "exit_price": exit_price,
                     "pnl": float(pnl),
-                    "exit_order_id": exit_order.broker_order_id,
+                    "exit_order_id": exit_order_id,
                 })
-        
+
         except Exception as e:
             logger.exception("Error closing live trade %s: %s", trade_id, e)
-            # Still try to close in DB even if broker order fails
-            pnl = close_trade(trade, exit_price, "Manual")
-            
+            result = close_trade(order, exit_price, "Manual")
+            pnl = result.get("realized_pnl", 0) if isinstance(result, dict) else 0
+
             return Response({
                 "success": True,
                 "message": "Trade closed in database (broker order may have failed)",
@@ -635,19 +638,52 @@ class PaperTradeView(APIView):
     def get(self, request):
         """List paper trades"""
         status_filter = request.query_params.get("status", "open")
-        
-        qs = OptionTrade.objects.filter(
-            user=request.user, 
-            mode="paper"
-        ).select_related("symbol", "contract").order_by("-entry_time")
-        
+
+        qs = Order.objects.filter(
+            user=request.user,
+            mode="paper",
+            instrument_type="options",
+        ).select_related("asset").order_by("-entry_time", "-created_at")
+
         if status_filter != "all":
             qs = qs.filter(status=status_filter)
-        
+
+        trades_data = []
+        for order in qs:
+            ep = float(order.entry_price or 0)
+            cp = float(order.current_price or order.entry_price or 0)
+            qty = float(order.quantity or 0)
+            side = order.side or "buy"
+
+            if side == "buy":
+                unrealized_pnl = (cp - ep) * qty
+            else:
+                unrealized_pnl = (ep - cp) * qty
+
+            trades_data.append({
+                "id": str(order.id),
+                "symbol": order.symbol_display or (order.asset.symbol if order.asset else ""),
+                "option_type": order.option_type,
+                "trade_type": side,
+                "quantity": qty,
+                "lots": order.lots,
+                "entry_price": ep,
+                "current_price": cp,
+                "unrealized_pnl": round(unrealized_pnl, 2),
+                "stop_loss": float(order.sl_price) if order.sl_price else None,
+                "target_price": float(order.target_price) if order.target_price else None,
+                "entry_time": order.entry_time.isoformat() if order.entry_time else order.created_at.isoformat(),
+                "exit_time": order.exit_time.isoformat() if order.exit_time else None,
+                "exit_price": float(order.exit_price) if order.exit_price else None,
+                "realized_pnl": float(order.realized_pnl) if order.realized_pnl else None,
+                "status": order.status,
+                "mode": order.mode,
+            })
+
         return Response({
             "success": True,
-            "trades": OptionTradeSerializer(qs, many=True).data,
-            "count": qs.count(),
+            "trades": trades_data,
+            "count": len(trades_data),
         })
     
     def post(self, request):
@@ -780,50 +816,64 @@ class PaperTradeView(APIView):
                 }, status=status.HTTP_400_BAD_REQUEST)
             
             # Daily limit check
-            today_count = OptionTrade.objects.filter(
-                user=request.user, 
-                mode="paper", 
-                entry_time__date=timezone.now().date()
+            today_count = Order.objects.filter(
+                user=request.user,
+                mode="paper",
+                instrument_type="options",
+                created_at__date=timezone.now().date()
             ).count()
             if today_count >= 50:
                 return Response({"error": "Daily paper trade limit reached (50/day)"}, status=status.HTTP_400_BAD_REQUEST)
-            
-            # ── Create paper trade ────────────────────────────────────────────
+
+            # Get or create Asset
+            symbol_str = f"{symbol_name}{int(strike)}{option_type}"
+            asset, _ = Asset.objects.get_or_create(
+                symbol=symbol_str,
+                defaults={
+                    "name": symbol_str,
+                    "asset_type": "options",
+                    "exchange": "NSE",
+                    "currency": "INR",
+                    "is_active": True,
+                },
+            )
+
+            # ── Create paper Order ────────────────────────────────────────────
             with transaction.atomic():
-                option_trade = OptionTrade.objects.create(
+                order_obj = Order.objects.create(
                     user=request.user,
-                    symbol=symbol,
-                    contract=option_contract,
-                    
-                    trade_type=trade_type,
-                    action=trade_type,
-                    quantity=quantity,
-                    lots=lots or (quantity // symbol.lot_size),
+                    asset=asset,
+                    mode=Order.Mode.PAPER,
+                    side=trade_type,
+                    order_type=Order.OrderType.MARKET,
+                    status=Order.Status.OPEN,
+                    quantity=Decimal(str(quantity)),
+                    filled_qty=Decimal(str(quantity)),
                     entry_price=Decimal(str(entry_price)),
                     current_price=Decimal(str(entry_price)),
-                    stop_loss=Decimal(str(stop_loss)),
-                    take_profit=Decimal(str(target_price)) if target_price else None,
+                    sl_price=Decimal(str(stop_loss)),
                     target_price=Decimal(str(target_price)) if target_price else None,
-                    use_trailing_sl=bool(data.get("use_trailing_sl", False)),
-                    trailing_sl_percent=Decimal(str(data.get("trailing_sl_percent", 0))) if data.get("use_trailing_sl") else None,
-                    entry_spot=Decimal(str(spot)) if spot else None,
-                    mode="paper",
-                    status="open",
-                    setup_type=data.get("setup_type", "Manual"),
+                    entry_time=timezone.now(),
+                    option_type=option_type,
+                    lots=lots or (quantity // symbol.lot_size),
+                    position_size=quantity,
+                    symbol_display=symbol_str,
+                    instrument_type="options",
+                    notes=data.get("setup_type", "Manual"),
                 )
-                
+
                 # Deduct margin from paper account
                 paper_acc.balance -= required_margin
                 paper_acc.save()
-                
+
                 logger.info(
                     "Paper trade placed: user=%s, symbol=%s, strike=%s, qty=%s",
                     request.user.id, symbol_name, strike, quantity
                 )
-            
+
             return Response({
                 "success": True,
-                "trade_id": option_trade.id,
+                "trade_id": str(order_obj.id),
                 "symbol": fyers_symbol,
                 "strike": float(strike),
                 "option_type": option_type,
@@ -844,25 +894,26 @@ class PaperTradeView(APIView):
     def delete(self, request, trade_id):
         """Manually close paper trade"""
         try:
-            trade = OptionTrade.objects.get(
-                id=trade_id, 
-                user=request.user, 
-                mode="paper", 
-                status="open"
+            order = Order.objects.get(
+                id=trade_id,
+                user=request.user,
+                mode="paper",
+                status="open",
             )
-        except OptionTrade.DoesNotExist:
+        except Order.DoesNotExist:
             return Response({
                 "error": "Paper trade not found or already closed"
             }, status=status.HTTP_404_NOT_FOUND)
-        
+
         exit_price = request.data.get("exit_price")
         if exit_price:
             exit_price = float(exit_price)
         else:
-            exit_price = float(trade.current_price or trade.entry_price)
-        
-        pnl = close_trade(trade, exit_price, "Manual")
-        
+            exit_price = float(order.current_price or order.entry_price or 0)
+
+        result = close_trade(order, exit_price, "Manual")
+        pnl = result.get("realized_pnl", 0) if isinstance(result, dict) else 0
+
         return Response({
             "success": True,
             "message": "Paper trade closed",
@@ -895,27 +946,28 @@ class PaperAccountView(APIView):
                     balance=Decimal("100000.00")
                 )
 
-        # Calculate stats
-        open_trades = OptionTrade.objects.filter(
-            user=request.user, 
-            mode="paper", 
-            status="open"
-        ).select_related("contract")
+        # Calculate stats from Order model
+        open_orders = Order.objects.filter(
+            user=request.user,
+            mode="paper",
+            status="open",
+            instrument_type="options",
+        )
 
         margin_used = sum(
-            float(t.entry_price) * int(t.quantity) 
-            for t in open_trades
+            float(o.entry_price or 0) * float(o.quantity or 0)
+            for o in open_orders
         )
 
         # Unrealized PnL
         unrealized_pnl = 0.0
-        for trade in open_trades:
-            if trade.current_price:
-                cp = float(trade.current_price)
-                ep = float(trade.entry_price)
-                qty = int(trade.quantity)
-                
-                if trade.action == "buy" or trade.trade_type == "buy":
+        for order in open_orders:
+            if order.current_price and order.entry_price:
+                cp = float(order.current_price)
+                ep = float(order.entry_price)
+                qty = float(order.quantity)
+
+                if order.side == "buy":
                     unrealized_pnl += (cp - ep) * qty
                 else:
                     unrealized_pnl += (ep - cp) * qty
@@ -933,7 +985,7 @@ class PaperAccountView(APIView):
             "realized_pnl": round(realized_pnl, 2),
             "unrealized_pnl": round(unrealized_pnl, 2),
             "total_pnl": round(realized_pnl + unrealized_pnl, 2),
-            "open_trades": open_trades.count(),
+            "open_trades": open_orders.count(),
         })
 
 
@@ -966,61 +1018,60 @@ class CloseTradeView(APIView):
             }, status=status.HTTP_400_BAD_REQUEST)
         
         try:
-            trade = OptionTrade.objects.select_related(
-                "contract"
-            ).get(id=trade_id, user=request.user, status="open")
-            
-            # Determine exit price
+            order = Order.objects.get(id=trade_id, user=request.user, status="open")
+
             if exit_price is None:
-                contract = trade.contract
-                exit_price = float(trade.current_price or contract.ltp or trade.entry_price)
+                exit_price = float(order.current_price or order.entry_price or 0)
             else:
                 exit_price = float(exit_price)
-            
-            # For live trades, place broker order
-            if trade.mode == "live":
+
+            # For live orders, place broker exit order
+            if order.mode == "live":
                 try:
                     adapter = BrokerAdapterFactory.get_adapter(request.user)
-                    exit_side = "sell" if (trade.action == "buy" or trade.trade_type == "buy") else "buy"
-                    contract = trade.contract
-                    
+                    exit_side = "sell" if order.side == "buy" else "buy"
+                    fyers_sym = order.symbol_display or (order.asset.symbol if order.asset else "")
+
                     exit_response = adapter.place_order(
-                        symbol=contract.fyers_symbol,
+                        symbol=fyers_sym,
                         side=exit_side,
-                        qty=int(trade.quantity),
+                        qty=int(order.quantity),
                         order_type="market",
                         price=0,
                         product_type="INTRADAY",
                     )
-                    
-                    if (exit_response.success if hasattr(exit_response, "success") else _order_success(exit_response)):
-                        BrokerOrder.objects.create(
-                            user=request.user,
-                            option_trade=trade,
-                            broker_order_id=_order_id(exit_response),
-                            symbol=contract.fyers_symbol,
-                            quantity=float(trade.quantity),
-                            direction=exit_side.upper(),
-                            order_type="MARKET",
-                            status="PLACED",
-                            metadata={"order_purpose": "close_trade"}
-                        )
+
+                    if _order_success(exit_response):
+                        broker_acct = getattr(adapter, 'broker_account', None)
+                        if broker_acct:
+                            BrokerOrder.objects.create(
+                                broker_account=broker_acct,
+                                order=order,
+                                broker_order_id=_order_id(exit_response) or "",
+                                symbol=fyers_sym,
+                                quantity=int(order.quantity),
+                                side=exit_side,
+                                order_type=BrokerOrder.OrderType.EXIT,
+                                status=BrokerOrder.Status.PLACED,
+                                notes="close_trade",
+                            )
                 except Exception as e:
-                    logger.error("Broker exit order failed for trade %s: %s", trade_id, e)
-            
-            # Close trade in database
-            pnl = close_trade(trade, exit_price, "manual")
-            
+                    logger.error("Broker exit order failed for order %s: %s", trade_id, e)
+
+            # Close order in database
+            result = close_trade(order, exit_price, "manual")
+            pnl = result.get("realized_pnl", 0) if isinstance(result, dict) else 0
+
             return Response({
                 "success": True,
                 "message": "Trade closed successfully",
                 "trade_id": str(trade_id),
                 "exit_price": exit_price,
                 "pnl": float(pnl),
-                "mode": trade.mode,
+                "mode": order.mode,
             })
-        
-        except OptionTrade.DoesNotExist:
+
+        except Order.DoesNotExist:
             return Response({
                 "error": "Trade not found or unauthorized"
             }, status=status.HTTP_404_NOT_FOUND)
@@ -1042,47 +1093,43 @@ class OpenTradesView(APIView):
     def get(self, request):
         mode = request.query_params.get("mode", "all")
         
-        qs = OptionTrade.objects.filter(
+        qs = Order.objects.filter(
             user=request.user,
-            status="open"
-        ).select_related("symbol", "contract")
-        
+            status="open",
+            instrument_type="options",
+        ).select_related("asset")
+
         if mode != "all":
             qs = qs.filter(mode=mode)
-        
+
         trades_data = []
-        for trade in qs:
-            contract = trade.contract
-            if not contract:
-                continue
-            
-            # Calculate unrealized PnL
-            current_price = float(trade.current_price or contract.ltp or trade.entry_price)
-            entry_price = float(trade.entry_price)
-            quantity = int(trade.quantity)
-            
-            if trade.action == "buy" or trade.trade_type == "buy":
-                unrealized_pnl = (current_price - entry_price) * quantity
+        for order in qs:
+            ep = float(order.entry_price or 0)
+            cp = float(order.current_price or order.entry_price or 0)
+            qty = float(order.quantity or 0)
+            side = order.side or "buy"
+
+            if side == "buy":
+                unrealized_pnl = (cp - ep) * qty
             else:
-                unrealized_pnl = (entry_price - current_price) * quantity
-            
+                unrealized_pnl = (ep - cp) * qty
+
             trades_data.append({
-                "id": trade.id,
-                "mode": trade.mode,
-                "symbol": contract.option_symbol.symbol if hasattr(contract, 'option_symbol') else trade.symbol.name,
-                "strike": float(contract.strike),
-                "option_type": contract.option_type,
-                "trade_type": trade.action or trade.trade_type,
-                "quantity": quantity,
-                "lots": trade.lots if hasattr(trade, 'lots') else quantity // (trade.symbol.lot_size if trade.symbol else 50),
-                "entry_price": entry_price,
-                "current_price": current_price,
+                "id": str(order.id),
+                "mode": order.mode,
+                "symbol": order.symbol_display or (order.asset.symbol if order.asset else ""),
+                "option_type": order.option_type,
+                "trade_type": side,
+                "quantity": qty,
+                "lots": order.lots,
+                "entry_price": ep,
+                "current_price": cp,
                 "unrealized_pnl": round(unrealized_pnl, 2),
-                "unrealized_pnl_percent": round((unrealized_pnl / (entry_price * quantity) * 100), 2) if entry_price > 0 else 0,
-                "stop_loss": float(trade.stop_loss) if trade.stop_loss else None,
-                "target_price": float(trade.target_price or trade.take_profit) if (trade.target_price or trade.take_profit) else None,
-                "entry_time": trade.entry_time.isoformat(),
-                "setup_type": trade.setup_type if hasattr(trade, 'setup_type') else "Manual",
+                "unrealized_pnl_percent": round((unrealized_pnl / (ep * qty) * 100), 2) if ep > 0 else 0,
+                "stop_loss": float(order.sl_price) if order.sl_price else None,
+                "target_price": float(order.target_price) if order.target_price else None,
+                "entry_time": order.entry_time.isoformat() if order.entry_time else order.created_at.isoformat(),
+                "setup_type": order.notes or "Manual",
             })
         
         return Response({
@@ -1209,27 +1256,26 @@ class OptionSnapshotView(APIView):
 #  HELPER FUNCTIONS
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _calculate_unrealized_pnl(trade: OptionTrade) -> float:
-    """Calculate unrealized PnL for a trade"""
+def _calculate_unrealized_pnl(order) -> float:
+    """Calculate unrealized PnL for an Order"""
     try:
-        contract = trade.contract
-        current_price = float(trade.current_price or contract.ltp or trade.entry_price)
-        entry_price = float(trade.entry_price)
-        quantity = int(trade.quantity)
-        
-        if trade.action == "buy" or trade.trade_type == "buy":
-            return (current_price - entry_price) * quantity
+        cp = float(order.current_price or order.entry_price or 0)
+        ep = float(order.entry_price or 0)
+        qty = float(order.quantity or 0)
+
+        if order.side == "buy":
+            return (cp - ep) * qty
         else:
-            return (entry_price - current_price) * quantity
+            return (ep - cp) * qty
     except Exception:
         return 0.0
 
 
-def _get_broker_order_id(trade: OptionTrade) -> str | None:
-    """Get broker order ID for a trade"""
+def _get_broker_order_id_from_order(order) -> str | None:
+    """Get broker order ID for an Order"""
     try:
-        order = BrokerOrder.objects.filter(option_trade=trade).order_by("-created_at").first()
-        return order.broker_order_id if order else None
+        bo = BrokerOrder.objects.filter(order=order).order_by("-created_at").first()
+        return bo.broker_order_id if bo else None
     except Exception:
         return None
 

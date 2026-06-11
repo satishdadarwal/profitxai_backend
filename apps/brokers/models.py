@@ -119,22 +119,16 @@ class BrokerOrder(models.Model):
     """
     Algo trading order lifecycle — Unified model.
 
-    Flow (Live via new Order layer):
+    Flow (Live):
         Signal → Order created → BrokerOrder(PENDING)
             → Celery → Broker API
             → OPEN → COMPLETE / REJECTED / FAILED → retry
 
-    Flow (Legacy Live):
-        OptionTrade.save(mode='live')
-            → signal → BrokerOrder(PENDING)
-            → Celery → Broker API
-            → OPEN → COMPLETE / REJECTED / FAILED → retry
-
     Flow (Paper):
-        PaperTrade.save()
-            → signal → BrokerOrder(COMPLETE)   ← no real broker call
+        Order(mode=paper).save()
+            → BrokerOrder(COMPLETE)   ← no real broker call
 
-    Constraint: exactly ONE of order / option_trade / paper_trade must be set.
+    Links to Order model (canonical). OptionTrade/PaperTrade removed.
     """
 
     class Status(models.TextChoices):
@@ -175,27 +169,12 @@ class BrokerOrder(models.Model):
         related_name="broker_orders",
     )
 
-    # Exactly ek set hoga — CheckConstraint below enforce karta hai
-    option_trade = models.ForeignKey(
-        "options.OptionTrade",
-        on_delete=models.CASCADE,
-        null=True, blank=True,
-        related_name="broker_orders",
-        help_text="NSE live options trade (legacy flow)",
-    )
-    paper_trade = models.ForeignKey(
-        "paper_trading.PaperTrade",
-        on_delete=models.CASCADE,
-        null=True, blank=True,
-        related_name="broker_orders",
-        help_text="Paper trade (crypto / futures / options simulation)",
-    )
     order = models.ForeignKey(
         "orders.Order",
         on_delete=models.CASCADE,
         null=True, blank=True,
         related_name="broker_executions",
-        help_text="The Order this execution attempt belongs to (new flow)",
+        help_text="The Order this execution attempt belongs to",
     )
 
     # ── Order identity & details ──────────────────────────────────────────────
@@ -320,52 +299,17 @@ class BrokerOrder(models.Model):
         ordering = ["-created_at"]
         indexes = [
             models.Index(fields=["broker_account", "status"]),
-            models.Index(fields=["option_trade", "order_type"]),
-            models.Index(fields=["paper_trade", "status"]),
             models.Index(fields=["order", "status"]),
             models.Index(fields=["status", "next_retry_at"]),
             models.Index(fields=["broker_order_id"]),
             models.Index(fields=["exchange_order_id"]),
             models.Index(fields=["symbol", "status"]),
         ]
-        constraints = [
-            models.CheckConstraint(
-                check=(
-                    # Case 1: Sirf order set hai (naya flow)
-                    models.Q(
-                        order__isnull=False,
-                        option_trade__isnull=True,
-                        paper_trade__isnull=True,
-                    )
-                    # Case 2: Sirf option_trade set hai (purana live flow)
-                    | models.Q(
-                        order__isnull=True,
-                        option_trade__isnull=False,
-                        paper_trade__isnull=True,
-                    )
-                    # Case 3: Sirf paper_trade set hai (purana paper flow)
-                    | models.Q(
-                        order__isnull=True,
-                        option_trade__isnull=True,
-                        paper_trade__isnull=False,
-                    )
-                ),
-                name="brokerorder_exactly_one_trade_fk",
-            )
-        ]
 
     # ── Dunder ────────────────────────────────────────────────────────────────
     def __str__(self):
         broker = self.broker_account.broker if self.broker_account_id else "?"
-        if self.option_trade_id:
-            trade = f"OT:{str(self.option_trade_id)[:8]}"
-        elif self.paper_trade_id:
-            trade = f"PT:{str(self.paper_trade_id)[:8]}"
-        elif self.order_id:
-            trade = f"OR:{str(self.order_id)[:8]}"
-        else:
-            trade = "UNLINKED"
-
+        trade = f"OR:{str(self.order_id)[:8]}" if self.order_id else "UNLINKED"
         oid = self.broker_order_id or self.exchange_order_id or str(self.id)[:8]
         return (
             f"{broker} | {trade} | {self.order_type} | "
@@ -375,21 +319,19 @@ class BrokerOrder(models.Model):
     # ── Properties ────────────────────────────────────────────────────────────
     @property
     def linked_trade(self):
-        """Whichever trade is linked — option, paper, ya order."""
-        return self.option_trade or self.paper_trade or self.order
+        """The Order linked to this broker execution."""
+        return self.order
 
     @property
     def is_paper(self) -> bool:
-        """True agar ye paper trade ka order hai."""
-        if self.paper_trade_id:
-            return True
+        """True if this is a paper trade order."""
         if self.order_id:
             return self.order.mode == "paper"
         return False
 
     @property
     def is_option_order(self) -> bool:
-        return self.option_trade is not None
+        return bool(self.order_id and self.order and self.order.instrument_type == "options")
 
     @property
     def broker_name(self) -> str | None:

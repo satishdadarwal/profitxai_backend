@@ -1,13 +1,9 @@
 import uuid
 from decimal import Decimal
-from typing import TYPE_CHECKING
 
 from django.conf import settings
 from django.db import models
 from django.utils import timezone
-
-if TYPE_CHECKING:
-    from django.db.models import QuerySet
 
 
 # ─────────────────────────────────────────────
@@ -133,9 +129,6 @@ class PaperAccount(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
-    if TYPE_CHECKING:
-        trades: "QuerySet[PaperTrade]"
-
     def __str__(self):
         return f"{self.user} | ₹{self.balance}"
 
@@ -252,10 +245,15 @@ class PaperAccount(models.Model):
         }
         return tier_buffer.get(self.risk_tier, Decimal('30.0'))
 
+    def _paper_orders(self):
+        """Return queryset of paper Orders for this account's user."""
+        from apps.orders.models import Order
+        return Order.objects.filter(user=self.user, mode=Order.Mode.PAPER)
+
     @property
     def current_crypto_positions(self):
         """Count of currently open crypto positions"""
-        return self.trades.filter(asset_type="crypto", status="open").count()
+        return self._paper_orders().filter(instrument_type="futures", status="open").count()
 
     # ─────────────────────────────────────────────
     # 📈 PNL PROPERTIES
@@ -264,17 +262,25 @@ class PaperAccount(models.Model):
     @property
     def total_pnl(self):
         """Total realized PnL from closed trades"""
-        closed = self.trades.filter(status="closed").aggregate(
-            total=models.Sum("pnl")
+        closed = self._paper_orders().filter(status="filled").aggregate(
+            total=models.Sum("realized_pnl")
         )["total"] or Decimal("0")
         return closed
 
     @property
     def unrealized_pnl(self):
         """Total unrealized PnL from open trades"""
+        from apps.orders.models import Order
         total = Decimal("0")
-        for t in self.trades.filter(status="open"):
-            total += t.unrealized_pnl
+        for order in self._paper_orders().filter(status="open"):
+            if order.current_price and order.entry_price:
+                qty = Decimal(str(order.quantity or 0))
+                cp = Decimal(str(order.current_price))
+                ep = Decimal(str(order.entry_price))
+                if order.side == Order.Side.BUY:
+                    total += (cp - ep) * qty
+                else:
+                    total += (ep - cp) * qty
         return total
 
     @property
@@ -286,10 +292,10 @@ class PaperAccount(models.Model):
     def todays_realized_pnl(self):
         """Today's realized PnL (from closed trades)"""
         today = timezone.now().date()
-        return self.trades.filter(
-            status="closed",
-            closed_at__date=today
-        ).aggregate(total=models.Sum("pnl"))["total"] or Decimal("0")
+        return self._paper_orders().filter(
+            status="filled",
+            exit_time__date=today
+        ).aggregate(total=models.Sum("realized_pnl"))["total"] or Decimal("0")
 
     @property
     def daily_loss_limit_amount(self):
@@ -326,10 +332,12 @@ class PaperAccount(models.Model):
 
     @property
     def margin_used(self):
-        """Total margin locked in open positions"""
-        return self.trades.filter(status="open").aggregate(
-            total=models.Sum("margin_used")
-        )["total"] or Decimal("0")
+        """Total margin locked in open positions (entry_price * quantity as proxy)"""
+        total = Decimal("0")
+        for order in self._paper_orders().filter(status="open"):
+            if order.entry_price and order.quantity:
+                total += Decimal(str(order.entry_price)) * Decimal(str(order.quantity))
+        return total
 
     @property
     def available_balance(self):
@@ -350,7 +358,7 @@ class PaperAccount(models.Model):
                 limit_display += f" ({self.daily_loss_limit_pct}% of capital)"
             return False, f"Daily loss limit hit: ₹{self.todays_realized_pnl} (limit: {limit_display})"
 
-        open_count = self.trades.filter(status="open").count()
+        open_count = self._paper_orders().filter(status="open").count()
         if open_count >= self.max_open_trades:
             return False, f"Max positions reached ({self.max_open_trades})"
 
@@ -410,97 +418,4 @@ class PaperTopUp(models.Model):
         return f"₹{self.amount} | {self.status}"
 
 
-# ─────────────────────────────────────────────
-# 📊 PAPER TRADE MODEL
-# ─────────────────────────────────────────────
-class PaperTrade(models.Model):
-    # DEPRECATED: Use apps.orders.models.Order instead
-    # Safe to delete after: all queries migrated to Order model
-
-    class AssetType(models.TextChoices):
-        OPTION = "option", "Option"
-        FUTURES = "futures", "Futures"
-        CRYPTO = "crypto", "Crypto"
-
-    class Side(models.TextChoices):
-        BUY = "buy", "Buy"
-        SELL = "sell", "Sell"
-        LONG = "long", "Long"
-        SHORT = "short", "Short"
-
-    class Status(models.TextChoices):
-        OPEN = "open", "Open"
-        CLOSED = "closed", "Closed"
-
-    class ExitReason(models.TextChoices):
-        TARGET = "target", "Target Hit"
-        SL = "sl", "Stop Loss Hit"
-        MANUAL = "manual", "Manual Close"
-
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    account = models.ForeignKey(PaperAccount, on_delete=models.CASCADE, related_name="trades")
-    symbol = models.CharField(max_length=50)
-    asset_type = models.CharField(max_length=20, choices=AssetType.choices)
-    display_name = models.CharField(max_length=100, blank=True)
-    
-    side = models.CharField(max_length=10, choices=Side.choices)
-    
-    quantity = models.DecimalField(max_digits=10, decimal_places=4)
-    lot_size = models.IntegerField(default=1)
-    leverage = models.IntegerField(default=1)
-    entry_price = models.DecimalField(max_digits=14, decimal_places=4)
-    current_price = models.DecimalField(max_digits=14, decimal_places=4, default=0)
-    stop_loss = models.DecimalField(max_digits=14, decimal_places=4, null=True, blank=True)
-    target_price = models.DecimalField(max_digits=14, decimal_places=4, null=True, blank=True)
-    exit_price = models.DecimalField(max_digits=14, decimal_places=4, null=True, blank=True)
-    strike_price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
-    option_type = models.CharField(max_length=10, blank=True)
-    pnl = models.DecimalField(max_digits=14, decimal_places=2, default=0)
-    margin_used = models.DecimalField(max_digits=14, decimal_places=2, default=0)
-    status = models.CharField(max_length=10, choices=Status.choices, default=Status.OPEN)
-    exit_reason = models.CharField(max_length=50, choices=ExitReason.choices, blank=True)
-    setup_type = models.CharField(max_length=50, blank=True)
-    strategy_id = models.CharField(max_length=100, blank=True)
-    nifty_spot_at_entry = models.DecimalField(max_digits=10, decimal_places=2, default=0)
-    opened_at = models.DateTimeField(auto_now_add=True)
-    closed_at = models.DateTimeField(null=True, blank=True)
-
-    class Meta:
-        ordering = ["-opened_at"]
-        indexes = [
-            models.Index(fields=['symbol', 'status']),
-            models.Index(fields=['account', 'status']),
-        ]
-
-    def __str__(self):
-        return f"{self.symbol} {self.side} @ {self.entry_price}"
-
-    def save(self, *args, **kwargs):
-        # ✅ Always normalize symbol before saving
-        self.symbol = normalize_symbol(self.symbol)
-        super().save(*args, **kwargs)
-
-    @property
-    def unrealized_pnl(self):
-        """Calculate unrealized PnL for open positions"""
-        if self.status != "open" or not self.current_price:
-            return Decimal("0")
-        
-        qty = self.quantity * self.lot_size
-        cp = Decimal(str(self.current_price))
-        ep = Decimal(str(self.entry_price))
-        
-        # Handle both buy/sell AND long/short
-        if self.side in ['buy', 'long']:
-            raw = (cp - ep) * qty
-        else:  # sell or short
-            raw = (ep - cp) * qty
-        
-        return raw * self.leverage
-
-    @property
-    def unrealized_pnl_pct(self):
-        """Calculate unrealized PnL %"""
-        if not self.margin_used:
-            return Decimal("0")
-        return (self.unrealized_pnl / self.margin_used * 100).quantize(Decimal("0.01"))
+# PaperTrade has been removed. Use apps.orders.models.Order with mode="paper" instead.

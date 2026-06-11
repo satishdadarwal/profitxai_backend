@@ -1,7 +1,7 @@
 import logging
 from decimal import Decimal
 from django.utils import timezone
-from .models import PaperAccount, PaperTrade, normalize_symbol, get_lot_size
+from .models import PaperAccount, normalize_symbol, get_lot_size
 
 logger = logging.getLogger(__name__)
 
@@ -20,15 +20,7 @@ def detect_asset_type(raw_asset: str, symbol: str, instrument_type: str = "") ->
     2. raw_asset        — data["asset_type"] explicit value
     3. Symbol keywords  — NIFTY→option, BTC→crypto
     4. Fallback         — 'option' (Indian market default)
-
-    instrument_type values (from Strategy model):
-        'options'  → 'option'
-        'futures'  → 'futures'
-        'equity'   → 'equity'
-        'crypto'   → 'crypto'
-        'perp'     → 'futures'
     """
-    # 1. instrument_type (Strategy field) — highest priority
     instr = (instrument_type or "").strip().lower()
     if instr == "options":
         return "option"
@@ -39,7 +31,6 @@ def detect_asset_type(raw_asset: str, symbol: str, instrument_type: str = "") ->
     if instr == "crypto":
         return "crypto"
 
-    # 2. Explicit raw_asset value
     raw = (raw_asset or "").strip().lower()
     if raw in ("option", "options"):
         return "option"
@@ -50,18 +41,15 @@ def detect_asset_type(raw_asset: str, symbol: str, instrument_type: str = "") ->
     if raw == "equity":
         return "equity"
 
-    # 3. Symbol keyword matching
     symbol_upper = symbol.upper()
     if any(k in symbol_upper for k in _OPTION_KEYWORDS):
         return "option"
     if any(k in symbol_upper for k in _CRYPTO_KEYWORDS):
         return "crypto"
 
-    # 4. Unknown raw_asset — trust it as-is
     if raw:
         return raw
 
-    # 5. Fallback
     return "option"
 
 
@@ -78,115 +66,70 @@ def calculate_position_size(
     leverage: int = 1,
 
     # User inputs (priority order)
-    quantity: Decimal = None,          # 1️⃣ Direct qty
-    risk_amount: Decimal = None,       # 2️⃣ Fixed risk amount
-    risk_pct: Decimal = None,          # 3️⃣ Risk % of balance
+    quantity: Decimal = None,          # Direct qty
+    risk_amount: Decimal = None,       # Fixed risk amount
+    risk_pct: Decimal = None,          # Risk % of balance
     lot_size_override: int = None,     # For manual lot size
 ) -> dict:
     """
-    Hybrid position sizing calculator
-
-    Priority:
-    1. If `quantity` provided → use it directly
-    2. If `risk_amount` provided → calculate qty from risk amount
-    3. If `risk_pct` provided → calculate qty from % of balance
-    4. Fallback → use account's default risk_per_trade_pct
-
-    Returns:
-        {
-            "quantity": Decimal,
-            "lot_size": int,
-            "margin": Decimal,
-            "max_loss": Decimal,  # Expected loss if SL hit
-        }
+    Hybrid position sizing calculator. Returns dict with quantity/lot_size/margin/max_loss.
     """
-
-    # ✅ Get lot size for asset
     if lot_size_override:
         lot_size = lot_size_override
     else:
         lot_size = get_lot_size(symbol, asset_type)
 
-    # ─────────────────────────────────────────────
-    # 1️⃣ DIRECT QUANTITY (User Override)
-    # ─────────────────────────────────────────────
     if quantity is not None:
         qty = Decimal(str(quantity))
-
         if asset_type == "option":
             margin = entry_price * lot_size * qty
         elif asset_type == "futures":
             margin = (entry_price * lot_size * qty) / leverage
-        else:  # crypto
+        else:
             margin = (entry_price * qty) / leverage
-
         max_loss = calculate_max_loss(entry_price, stop_loss, qty, lot_size, side, leverage)
-
-        return {
-            "quantity": qty,
-            "lot_size": lot_size,
-            "margin": margin,
-            "max_loss": max_loss,
-        }
-
-    # ─────────────────────────────────────────────
-    # 2️⃣ RISK-BASED CALCULATION
-    # ─────────────────────────────────────────────
+        return {"quantity": qty, "lot_size": lot_size, "margin": margin, "max_loss": max_loss}
 
     if risk_amount is not None:
         risk = Decimal(str(risk_amount))
     elif risk_pct is not None:
         risk = account.balance * (Decimal(str(risk_pct)) / 100)
     else:
-        # Fallback to account default
         risk = account.balance * (account.risk_per_trade_pct / 100)
 
-    logger.info(f"💰 Risk amount: ₹{risk}")
+    logger.info(f"Risk amount: {risk}")
 
-    # ─────────────────────────────────────────────
-    # Calculate quantity based on risk & stop loss
-    # ─────────────────────────────────────────────
     if stop_loss and entry_price:
         risk_per_unit = abs(entry_price - Decimal(str(stop_loss)))
-
         if risk_per_unit > 0:
             if asset_type == "option":
                 qty = risk / (risk_per_unit * lot_size * leverage)
             elif asset_type == "futures":
                 qty = risk / (risk_per_unit * lot_size * leverage)
-            else:  # crypto
+            else:
                 qty = risk / (risk_per_unit * leverage)
-
             qty = qty.quantize(Decimal("0.0001"))
         else:
             raise ValueError("Stop loss too close to entry price")
     else:
-        # No stop loss → use risk as position size
         if asset_type == "option":
             qty = risk / (entry_price * lot_size)
         elif asset_type == "futures":
             qty = risk / (entry_price * lot_size)
-        else:  # crypto
+        else:
             qty = risk / entry_price
-
         qty = qty.quantize(Decimal("0.0001"))
 
-    # Calculate margin
     if asset_type == "option":
         margin = entry_price * lot_size * qty
     elif asset_type == "futures":
         margin = (entry_price * lot_size * qty) / leverage
-    else:  # crypto
+    else:
         margin = (entry_price * qty) / leverage
 
     max_loss = calculate_max_loss(entry_price, stop_loss, qty, lot_size, side, leverage)
 
-    return {
-        "quantity": qty,
-        "lot_size": lot_size,
-        "margin": margin,
-        "max_loss": max_loss,
-    }
+    return {"quantity": qty, "lot_size": lot_size, "margin": margin, "max_loss": max_loss}
 
 
 def calculate_max_loss(
@@ -200,12 +143,9 @@ def calculate_max_loss(
     """Calculate expected loss if stop loss hits"""
     if not stop_loss:
         return Decimal("0")
-
     risk_per_unit = abs(entry_price - stop_loss)
     total_qty = quantity * lot_size
-    max_loss = risk_per_unit * total_qty * leverage
-
-    return max_loss
+    return risk_per_unit * total_qty * leverage
 
 
 # ─────────────────────────────────────────────
@@ -213,18 +153,15 @@ def calculate_max_loss(
 # ─────────────────────────────────────────────
 def open_trade(user, data: dict):
     """
-    Open a new paper trade with proper risk management
+    Open a new paper trade (creates an Order with mode=paper).
     """
+    from apps.orders.models import Order, Asset
+
     account, _ = PaperAccount.objects.get_or_create(user=user)
 
-    # ─────────────────────────────
-    # Extract data
-    # ─────────────────────────────
     symbol = normalize_symbol(data.get("symbol", ""))
-
-    # ✅ FIX 1: Smart asset_type detection (symbol से fallback)
     raw_asset = data.get("asset_type", "")
-    instrument_type = data.get("instrument_type", "")  # strategy.instrument_type से आता है
+    instrument_type = data.get("instrument_type", "")
     asset_type = detect_asset_type(raw_asset, symbol, instrument_type)
 
     entry_price = Decimal(str(data["entry_price"]))
@@ -233,21 +170,13 @@ def open_trade(user, data: dict):
     stop_loss = Decimal(str(data["stop_loss"])) if data.get("stop_loss") else None
     target_price = Decimal(str(data["target_price"])) if data.get("target_price") else None
 
-    logger.info(f"🔍 Asset type detected: '{raw_asset}' → '{asset_type}' for symbol '{symbol}'")
+    logger.info(f"Asset type detected: '{raw_asset}' -> '{asset_type}' for symbol '{symbol}'")
 
-    # ─────────────────────────────
-    # ✅ BASIC VALIDATION (without position size)
-    # ─────────────────────────────
-    can_trade, reason = account.can_open_new_trade(
-        asset_type=asset_type,
-        leverage=leverage
-    )
+    # Validate (without position size first)
+    can_trade, reason = account.can_open_new_trade(asset_type=asset_type, leverage=leverage)
     if not can_trade:
         raise ValueError(reason)
 
-    # ─────────────────────────────
-    # 📊 POSITION CALCULATION
-    # ─────────────────────────────
     position = calculate_position_size(
         account=account,
         symbol=symbol,
@@ -267,13 +196,7 @@ def open_trade(user, data: dict):
     margin = position["margin"]
     max_loss = position["max_loss"]
 
-    logger.info(
-        f"📊 Position: qty={quantity}, lot={lot_size}, margin=₹{margin}, max_loss=₹{max_loss}"
-    )
-
-    # ─────────────────────────────
-    # 🔥 FINAL VALIDATION (with position size)
-    # ─────────────────────────────
+    # Final validation with position size
     can_trade, reason = account.can_open_new_trade(
         asset_type=asset_type,
         position_size=margin,
@@ -282,102 +205,114 @@ def open_trade(user, data: dict):
     if not can_trade:
         raise ValueError(reason)
 
-    # ✅ FIX 2: Risk cap — account की setting से लो, hardcoded 2% नहीं
-    # account.max_risk_per_trade_pct field होनी चाहिए; fallback 2%
-    max_risk_pct = Decimal(str(
-        getattr(account, "max_risk_per_trade_pct", None) or "2.0"
-    ))
+    max_risk_pct = Decimal(str(getattr(account, "max_risk_per_trade_pct", None) or "2.0"))
     allowed_loss = account.balance * (max_risk_pct / 100)
-
     if max_loss > Decimal("0") and max_loss > allowed_loss:
         raise ValueError(
-            f"Risk too high. Max allowed: ₹{allowed_loss:.2f} ({max_risk_pct}% of balance), "
-            f"Your risk: ₹{max_loss:.2f}"
+            f"Risk too high. Max allowed: {allowed_loss:.2f} ({max_risk_pct}% of balance), "
+            f"Your risk: {max_loss:.2f}"
         )
 
-    # Balance check
     if account.available_balance < margin:
         raise ValueError(
-            f"Insufficient balance. Need ₹{margin:.2f}, Available ₹{account.available_balance:.2f}"
+            f"Insufficient balance. Need {margin:.2f}, Available {account.available_balance:.2f}"
         )
 
-    # ─────────────────────────────
-    # ✅ CREATE TRADE
-    # ─────────────────────────────
-    trade = PaperTrade.objects.create(
-        account=account,
+    # Map asset_type to Order.InstrumentType
+    instrument_map = {
+        "option": Order.InstrumentType.OPTIONS,
+        "options": Order.InstrumentType.OPTIONS,
+        "futures": Order.InstrumentType.FUTURES,
+        "crypto": Order.InstrumentType.FUTURES,
+        "equity": Order.InstrumentType.EQUITY,
+    }
+    order_instrument_type = instrument_map.get(asset_type, Order.InstrumentType.OPTIONS)
+
+    # Get or create asset
+    asset, _ = Asset.objects.get_or_create(
         symbol=symbol,
-        asset_type=asset_type,
-        side=side,
-        quantity=quantity,
-        lot_size=lot_size,
-        leverage=leverage,
-        entry_price=entry_price,
-        current_price=entry_price,
-        stop_loss=stop_loss,
-        target_price=target_price,
-        margin_used=margin,
-        display_name=data.get("display_name", symbol),
-        setup_type=data.get("setup_type", ""),
-        strategy_id=data.get("strategy_id", ""),
-        strike_price=data.get("strike_price"),
-        option_type=data.get("option_type", ""),
-        nifty_spot_at_entry=data.get("nifty_spot_at_entry", 0),
+        defaults={
+            "name": data.get("display_name", symbol),
+            "instrument_type": order_instrument_type,
+        },
     )
 
-    # Deduct margin
+    # Map side
+    order_side = Order.Side.BUY if side in ("buy", "long") else Order.Side.SELL
+
+    metadata = {
+        "setup_type": data.get("setup_type", ""),
+        "strategy_id": data.get("strategy_id", ""),
+        "nifty_spot_at_entry": data.get("nifty_spot_at_entry", 0),
+        "strike_price": data.get("strike_price"),
+        "leverage": leverage,
+    }
+
+    order = Order.objects.create(
+        user=user,
+        asset=asset,
+        mode=Order.Mode.PAPER,
+        instrument_type=order_instrument_type,
+        side=order_side,
+        quantity=int(quantity * lot_size),
+        lots=int(quantity),
+        entry_price=entry_price,
+        current_price=entry_price,
+        sl_price=stop_loss,
+        target_price=target_price,
+        option_type=data.get("option_type", ""),
+        symbol_display=data.get("display_name", symbol),
+        status=Order.Status.OPEN,
+        entry_time=timezone.now(),
+        metadata=metadata,
+    )
+
+    # Deduct margin from paper account balance
     account.balance -= margin
     account.save()
 
-    logger.info(
-        f"✅ Trade opened: {trade.symbol} {trade.side} {trade.quantity} @ ₹{trade.entry_price}"
-    )
-
-    return trade
+    logger.info(f"Trade opened: {symbol} {side} {quantity} @ {entry_price}")
+    return order
 
 
 # ─────────────────────────────────────────────
 # 📉 CLOSE TRADE
 # ─────────────────────────────────────────────
 def close_trade(trade_id: str, exit_price: Decimal, reason: str = "manual"):
-    """Close a trade and calculate PnL"""
-    trade = PaperTrade.objects.get(id=trade_id)
+    """Close a paper trade Order and update balance."""
+    from apps.orders.models import Order
 
-    if trade.status == "closed":
-        logger.warning(f"⚠️ Trade {trade_id} already closed")
-        return trade
+    order = Order.objects.get(id=trade_id, mode=Order.Mode.PAPER)
 
-    account = trade.account
+    if order.status == Order.Status.FILLED:
+        logger.warning(f"Order {trade_id} already closed")
+        return order
 
-    # Calculate PnL
-    qty = trade.quantity * trade.lot_size
-    ep = trade.entry_price
-    xp = exit_price
+    account, _ = PaperAccount.objects.get_or_create(user=order.user)
 
-    if trade.side in ['buy', 'long']:
-        raw_pnl = (xp - ep) * qty
-    else:  # sell or short
-        raw_pnl = (ep - xp) * qty
+    entry = Decimal(str(order.entry_price or 0))
+    qty = Decimal(str(order.quantity or 0))
+    xp = Decimal(str(exit_price))
 
-    if trade.asset_type == "option":
-        pnl = raw_pnl   # Options में leverage नहीं लगता
+    if order.side == Order.Side.BUY:
+        pnl = (xp - entry) * qty
     else:
-        pnl = raw_pnl * trade.leverage
+        pnl = (entry - xp) * qty
 
-    # Update trade
-    trade.status = "closed"
-    trade.exit_price = exit_price
-    trade.exit_reason = reason
-    trade.pnl = pnl
-    trade.closed_at = timezone.now()
-    trade.save()
+    order.status = Order.Status.FILLED
+    order.exit_price = xp
+    order.exit_reason = reason
+    order.realized_pnl = pnl.quantize(Decimal("0.01"))
+    order.exit_time = timezone.now()
+    order.save(update_fields=["status", "exit_price", "exit_reason", "realized_pnl", "exit_time", "updated_at"])
 
-    # Return margin + PnL to account
-    account.balance += trade.margin_used + pnl
+    # Return margin + PnL to account (margin = entry * qty)
+    margin = entry * qty
+    account.balance += margin + pnl
     account.save()
 
-    logger.info(f"✅ Trade closed: {trade.symbol} | PnL: ₹{pnl}")
-    return trade
+    logger.info(f"Trade closed: {order.symbol_display} | PnL: {pnl}")
+    return order
 
 
 # ─────────────────────────────────────────────
@@ -385,20 +320,23 @@ def close_trade(trade_id: str, exit_price: Decimal, reason: str = "manual"):
 # ─────────────────────────────────────────────
 def reset_account(user, capital: float = 100000):
     """Reset account to initial state"""
+    from apps.orders.models import Order
+
     account, _ = PaperAccount.objects.get_or_create(user=user)
 
-    # Close all open trades
-    for trade in account.trades.filter(status="open"):
-        close_trade(trade.id, trade.current_price or trade.entry_price, "reset")
+    # Close all open paper orders
+    open_orders = Order.objects.filter(user=user, mode=Order.Mode.PAPER, status=Order.Status.OPEN)
+    for order in open_orders:
+        ep = order.current_price or order.entry_price or Decimal("0")
+        close_trade(str(order.id), Decimal(str(ep)), "reset")
 
-    # Reset balance
     capital = Decimal(str(capital))
     account.balance = capital
     account.initial_capital = capital
     account.total_withdrawn = Decimal("0")
     account.save()
 
-    logger.info(f"✅ Account reset: {user} | ₹{capital}")
+    logger.info(f"Account reset: {user} | {capital}")
     return account
 
 
@@ -414,5 +352,5 @@ def topup_account(user, amount: float):
     account.total_topup += amount
     account.save()
 
-    logger.info(f"✅ Account topped up: {user} | +₹{amount}")
+    logger.info(f"Account topped up: {user} | +{amount}")
     return account

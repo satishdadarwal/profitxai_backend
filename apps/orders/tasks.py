@@ -818,10 +818,9 @@ def sync_delta_pnl(self):
 
 @shared_task(bind=True, name="orders.sync_fyers_tradebook")
 def sync_fyers_tradebook(self):
-    """Fyers tradebook se aaj ke trades OptionTrade mein save karo."""
+    """Fyers tradebook se aaj ke trades Order model mein save karo."""
     from django.utils import timezone
     from apps.brokers.models import BrokerAccount
-    from apps.options.models import OptionTrade
     from decimal import Decimal
     import logging
     logger = logging.getLogger(__name__)

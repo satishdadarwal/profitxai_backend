@@ -2,7 +2,7 @@ import pandas as pd
 
 from apps.market.models import Candle  # tumhara existing candle model
 
-from .models import BacktestRun, OptionTrade
+from .models import BacktestRun
 from .services import check_sltp_for_trade, estimate_chain_premium
 
 

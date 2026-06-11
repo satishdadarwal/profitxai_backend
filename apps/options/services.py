@@ -14,7 +14,7 @@ from django.db import transaction
 from django.utils import timezone
 
 if TYPE_CHECKING:
-    from .models import OptionSymbol, OptionContract, OptionTrade
+    from .models import OptionSymbol, OptionContract
     from django.contrib.auth.models import User
 
 logger = logging.getLogger(__name__)
@@ -282,195 +282,148 @@ def build_option_chain(spot: float, symbol: OptionSymbol) -> List[Dict[str, Any]
 #  SL / TP check
 # ─────────────────────────────────────────────────────────────────────────────
 
-def check_sltp_for_trade(trade: OptionTrade, current_premium: float) -> Optional[Dict[str, Any]]:
-    """Return {'action': 'close', 'reason': 'SL'/'TP', 'exit_price': X} or None."""
-    if trade.action == "buy":
-        if current_premium <= trade.stop_loss:
-            return {"action": "close", "reason": "SL", "exit_price": trade.stop_loss}
-        if current_premium >= trade.target_price:
-            return {"action": "close", "reason": "TP", "exit_price": trade.target_price}
+def check_sltp_for_trade(order, current_premium: float) -> Optional[Dict[str, Any]]:
+    """
+    Check SL/TP for an Order (options).
+    Return {'action': 'close', 'reason': 'SL'/'TP', 'exit_price': X} or None.
+    """
+    sl = float(order.sl_price) if order.sl_price else None
+    tp = float(order.target_price) if order.target_price else None
+    side = order.side
+
+    if side == "buy":
+        if sl and current_premium <= sl:
+            return {"action": "close", "reason": "SL", "exit_price": sl}
+        if tp and current_premium >= tp:
+            return {"action": "close", "reason": "TP", "exit_price": tp}
     else:  # sell
-        if current_premium >= trade.stop_loss:
-            return {"action": "close", "reason": "SL", "exit_price": trade.stop_loss}
-        if current_premium <= trade.target_price:
-            return {"action": "close", "reason": "TP", "exit_price": trade.target_price}
+        if sl and current_premium >= sl:
+            return {"action": "close", "reason": "SL", "exit_price": sl}
+        if tp and current_premium <= tp:
+            return {"action": "close", "reason": "TP", "exit_price": tp}
     return None
 
 
-def update_trailing_sl(trade: OptionTrade, current_premium: float) -> float:
-    """15% trailing SL — only moves in trade's favour."""
+def update_trailing_sl(order, current_premium: float) -> float:
+    """15% trailing SL — only moves in order's favour."""
     trailing_pct = 0.15
+    sl = float(order.sl_price) if order.sl_price else None
 
-    if trade.action == "buy":
+    if sl is None:
+        return current_premium
+
+    if order.side == "buy":
         new_sl = current_premium * (1 - trailing_pct)
-        if new_sl > trade.stop_loss:
-            trade.stop_loss = new_sl
-            trade.save(update_fields=["stop_loss"])
+        if new_sl > sl:
+            order.sl_price = Decimal(str(new_sl))
+            order.save(update_fields=["sl_price", "updated_at"])
     else:
         new_sl = current_premium * (1 + trailing_pct)
-        if new_sl < trade.stop_loss:
-            trade.stop_loss = new_sl
-            trade.save(update_fields=["stop_loss"])
+        if new_sl < sl:
+            order.sl_price = Decimal(str(new_sl))
+            order.save(update_fields=["sl_price", "updated_at"])
 
-    return trade.stop_loss
+    return float(order.sl_price)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Trade lifecycle - FIXED VERSION
 # ─────────────────────────────────────────────────────────────────────────────
 
-def close_trade(trade_id: int, close_price: float, reason: str = "manual") -> Dict[str, Any]:
+def close_trade(order_id, close_price: float, reason: str = "manual") -> Dict[str, Any]:
     """
-    Close an option trade and update account balance
-    
+    Close an Order (options trade) by order_id or Order instance.
+
     Args:
-        trade_id: OptionTrade ID
+        order_id: Order UUID or Order instance
         close_price: Exit price
         reason: Closure reason (manual/sl_hit/tp_hit/expiry)
-    
-    CRITICAL FIX: acc.save() now correctly indented inside paper mode block
     """
     try:
-        from .models import OptionTrade
-        
-        trade = OptionTrade.objects.get(id=trade_id)
-        
-        # Validate trade state
-        if trade.status != "open":
-            raise ValueError(f"Trade {trade_id} is not open (status: {trade.status})")
-        
-        # Calculate P&L - using 'action' field (buy/sell) instead of 'trade_type'
-        if trade.action == "buy":
-            pnl = (close_price - trade.entry_price) * trade.quantity
-        else:  # sell
-            pnl = (trade.entry_price - close_price) * trade.quantity
-        
-        realized_pnl = float(pnl)
-        
-        # Update trade record - using 'pnl' and 'exit_reason' fields
-        trade.exit_price = close_price
-        trade.exit_time = timezone.now()
-        trade.status = "closed"
-        trade.exit_reason = reason  # Changed from close_reason
-        trade.pnl = realized_pnl    # Changed from realized_pnl
-        trade.save()
-        
-        # ✅ CRITICAL FIX: acc.save() moved INSIDE the if block
-        if trade.mode == "paper":
-            try:
-                from apps.paper_trading.models import PaperAccount
-                acc = PaperAccount.objects.get(user=trade.user)
-                margin = trade.entry_price * trade.quantity
-                acc.balance += Decimal(str(margin)) + Decimal(str(realized_pnl))
-                acc.total_pnl += Decimal(str(realized_pnl))
-                acc.save()  # ✅ FIXED: Now correctly indented inside if block
-            except Exception as exc:
-                logger.error("close_trade: PaperAccount update failed | trade=%s | %s", trade.id, exc)
-        
-        # For live trades, BrokerOrder will handle the actual closure
-        elif trade.mode == "live":
-            try:
-                from apps.brokers.models import BrokerOrder
-                
-                # Place exit order via broker adapter (if factory exists)
-                try:
-                    from apps.broker_adapters.factory import BrokerAdapterFactory
-                    adapter = BrokerAdapterFactory.get_adapter(trade.user)
-                    
-                    # Reverse the trade type for exit
-                    exit_side = "sell" if trade.action == "buy" else "buy"
-                    
-                    adapter.place_order(
-                        symbol=trade.contract.fyers_symbol,  # Changed from option_contract
-                        quantity=trade.quantity,
-                        side=exit_side,
-                        order_type="market",
-                        product_type="INTRADAY"
-                    )
-                except ImportError:
-                    logger.warning("BrokerAdapterFactory not available, skipping broker order")
-                
-                # BrokerOrder ko exit details ke saath update karo
-                bo = BrokerOrder.objects.filter(
-                    option_trade=trade,
-                    order_type=BrokerOrder.OrderType.ENTRY,  # ✅ FIX: enum use karo
-                ).first()
-                if bo:
-                    # metadata field exist nahi karta — notes mein append karo
-                    existing_notes = bo.notes or ""
-                    bo.notes = (
-                        existing_notes +
-                        f" | exit: pnl={realized_pnl:.2f} reason={reason}"
-                    )
-                    bo.save(update_fields=["notes"])
-                    
-            except Exception as exc:
-                logger.warning("close_trade: Live mode processing failed | %s", exc)
-        
+        from apps.orders.models import Order
+
+        if isinstance(order_id, Order):
+            order = order_id
+        else:
+            order = Order.objects.get(id=order_id)
+
+        if order.status != "open":
+            raise ValueError(f"Order {order_id} is not open (status: {order.status})")
+
+        entry = float(order.entry_price or 0)
+        qty = float(order.quantity or 0)
+
+        if order.side == "buy":
+            pnl = (close_price - entry) * qty
+        else:
+            pnl = (entry - close_price) * qty
+
+        realized_pnl = round(pnl, 2)
+
+        order.exit_price = Decimal(str(close_price))
+        order.exit_time = timezone.now()
+        order.status = Order.Status.FILLED
+        order.exit_reason = reason
+        order.realized_pnl = Decimal(str(realized_pnl))
+        order.save(update_fields=[
+            "exit_price", "exit_time", "status", "exit_reason",
+            "realized_pnl", "updated_at",
+        ])
+
         logger.info(
-            "Trade closed | id=%s | mode=%s | reason=%s | pnl=%.2f",
-            trade.id, trade.mode, reason, realized_pnl,
+            "Order closed | id=%s | mode=%s | reason=%s | pnl=%.2f",
+            order.id, order.mode, reason, realized_pnl,
         )
-        
+
         return {
             "success": True,
-            "trade_id": trade.id,
+            "trade_id": order.id,
             "realized_pnl": realized_pnl,
             "exit_price": close_price,
-            "reason": reason
+            "reason": reason,
         }
-        
+
     except Exception as e:
-        logger.error(f"Error closing trade {trade_id}: {str(e)}")
+        logger.error(f"Error closing order {order_id}: {str(e)}")
         return {"success": False, "error": str(e)}
 
 
 def monitor_open_trades() -> None:
     """
-    Monitor all open trades for SL/TP hits
-    Called by Celery beat every 10 seconds
+    Monitor all open option orders for SL/TP hits.
+    Called by Celery beat every 10 seconds.
     """
-    from .models import OptionTrade
-    
-    open_trades = OptionTrade.objects.filter(status="open")
-    
-    for trade in open_trades:
+    from apps.orders.models import Order
+
+    open_orders = Order.objects.filter(status="open", instrument_type="options")
+
+    for order in open_orders:
         try:
-            # Get current LTP from option contract
-            current_price = trade.contract.ltp  # Changed from option_contract
-            
+            current_price = float(order.current_price) if order.current_price else None
+
             if current_price is None:
                 continue
-            
-            # Check Stop Loss
-            if trade.stop_loss and current_price <= trade.stop_loss:
-                close_trade(
-                    trade_id=trade.id,
-                    close_price=trade.stop_loss,
-                    reason="sl_hit"
-                )
-                continue
-            
-            # Check Take Profit (target_price field exists)
-            if trade.target_price and current_price >= trade.target_price:
-                close_trade(
-                    trade_id=trade.id,
-                    close_price=trade.target_price,
-                    reason="tp_hit"
-                )
-                continue
-            
-            # Check Trailing Stop Loss (if fields exist in model)
-            # Commented out since use_trailing_sl and trailing_sl_percent may not exist
-            # if hasattr(trade, 'use_trailing_sl') and trade.use_trailing_sl:
-            #     if hasattr(trade, 'trailing_sl_percent') and trade.trailing_sl_percent:
-            #         trailing_sl = current_price * (1 - trade.trailing_sl_percent / 100)
-            #         if trade.stop_loss is None or trailing_sl > trade.stop_loss:
-            #             trade.stop_loss = trailing_sl
-            #             trade.save()
-        
+
+            sl = float(order.sl_price) if order.sl_price else None
+            tp = float(order.target_price) if order.target_price else None
+
+            if order.side == "buy":
+                if sl and current_price <= sl:
+                    close_trade(order, sl, "sl_hit")
+                    continue
+                if tp and current_price >= tp:
+                    close_trade(order, tp, "tp_hit")
+                    continue
+            else:
+                if sl and current_price >= sl:
+                    close_trade(order, sl, "sl_hit")
+                    continue
+                if tp and current_price <= tp:
+                    close_trade(order, tp, "tp_hit")
+                    continue
+
         except Exception as e:
-            logger.error(f"Error monitoring trade {trade.id}: {str(e)}")
+            logger.error(f"Error monitoring order {order.id}: {str(e)}")
             continue
 
 
@@ -497,12 +450,12 @@ def place_live_option_trade(
     metadata: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
-    Live options trade place karo (OptionTrade + BrokerOrder + Celery task).
+    Live options trade place karo (Order + BrokerOrder + Celery task).
 
     Returns:
         {
             "success": True,
-            "option_trade_id": str,
+            "trade_id": str,
             "broker_order_id": str,
             "contract": "NSE:NIFTY25MAY2221500CE",
             "message": "..."
@@ -510,14 +463,18 @@ def place_live_option_trade(
     """
     from apps.brokers.models import BrokerAccount, BrokerOrder
     from apps.brokers.tasks import place_broker_order
-    from .models import OptionTrade
+    from apps.orders.models import Order
+    from apps.market.models import Asset
 
     # ── 1. OptionSymbol + ATM Contract ───────────────────────────────────────
     sym      = get_or_create_option_symbol(symbol_name)
     contract = get_atm_contract(symbol_name, spot, option_type, expiry=expiry, monthly=monthly)
     qty      = lots * sym.lot_size
 
-    # ── 1b. ✅ Market hours guard — live orders sirf NSE hours mein ──────────
+    # Symbol display: e.g. NIFTY2450023500CE
+    symbol_str = f"{symbol_name}{int(contract.strike)}{option_type}"
+
+    # ── 1b. Market hours guard — live orders sirf NSE hours mein ────────────
     from django.utils import timezone as tz
     import datetime
     now_ist = tz.localtime(tz.now(), datetime.timezone(datetime.timedelta(hours=5, minutes=30)))
@@ -542,8 +499,7 @@ def place_live_option_trade(
     if not broker_account:
         return {"success": False, "error": "No active verified broker account found"}
 
-    # ── 2b. ✅ Risk check — order place karne se pehle ───────────────────────
-    # place_live_option_trade() ko directly call karne wale bhi risk rules follow karein.
+    # ── 2b. Risk check — order place karne se pehle ──────────────────────────
     try:
         from apps.risk.manager import RiskManager
         rm = RiskManager(user)
@@ -555,7 +511,7 @@ def place_live_option_trade(
         )
         if not allowed:
             logger.warning(
-                "❌ place_live_option_trade: Risk check blocked | user=%s | reason=%s",
+                "place_live_option_trade: Risk check blocked | user=%s | reason=%s",
                 user.pk, reason,
             )
             return {"success": False, "error": f"Risk check failed: {reason}"}
@@ -566,39 +522,52 @@ def place_live_option_trade(
         )
         return {"success": False, "error": "Risk check system error — order blocked"}
 
-    # ── 3. OptionTrade + BrokerOrder atomic create ───────────────────────────
+    # ── 3. Get or create Asset ────────────────────────────────────────────────
+    asset, _ = Asset.objects.get_or_create(
+        symbol=symbol_str,
+        defaults={
+            "name": symbol_str,
+            "asset_type": "options",
+            "exchange": "NSE",
+            "currency": "INR",
+            "is_active": True,
+        },
+    )
+
+    # ── 4. Order + BrokerOrder atomic create ──────────────────────────────────
     with transaction.atomic():
-        trade = OptionTrade.objects.create(
-            user         = user,
-            mode         = "live",  # Changed from OptionTrade.LIVE
-            symbol       = sym,
-            contract     = contract,
-            action       = action,
-            lots         = lots,
-            quantity     = qty,
-            entry_price  = entry_price,
-            target_price = target_price,
-            stop_loss    = stop_loss,
-            entry_spot   = spot,
-            current_price= entry_price,
-            setup_type   = setup_type,
-            timeframe    = timeframe,
-            strategy     = strategy,
-            metadata     = metadata or {},
+        order = Order.objects.create(
+            user            = user,
+            asset           = asset,
+            mode            = Order.Mode.LIVE,
+            side            = action,
+            order_type      = Order.OrderType.MARKET,
+            status          = Order.Status.OPEN,
+            quantity        = Decimal(str(qty)),
+            filled_qty      = Decimal(str(qty)),
+            entry_price     = Decimal(str(entry_price)),
+            current_price   = Decimal(str(entry_price)),
+            sl_price        = Decimal(str(stop_loss)),
+            target_price    = Decimal(str(target_price)),
+            entry_time      = timezone.now(),
+            option_type     = option_type,
+            lots            = lots,
+            position_size   = qty,
+            symbol_display  = symbol_str,
+            instrument_type = "options",
+            strategy        = strategy,
+            notes           = f"setup={setup_type} | timeframe={timeframe}",
         )
 
         broker_order = BrokerOrder.objects.create(
             broker_account = broker_account,
-            option_trade   = trade,                            # legacy live flow FK
+            order          = order,
             symbol         = contract.fyers_symbol,
-            side           = action.lower(),                   # ✅ FIX: direction→side
-            order_type     = BrokerOrder.OrderType.ENTRY,     # ✅ FIX: enum use karo
-            quantity       = int(qty),                        # ✅ FIX: IntegerField
+            side           = action.lower(),
+            order_type     = BrokerOrder.OrderType.ENTRY,
+            quantity       = int(qty),
             price          = float(entry_price),
-            status         = BrokerOrder.Status.PENDING,      # ✅ FIX: enum use karo
-            # stop_loss/take_profit/metadata BrokerOrder mein nahi hain.
-            # OptionTrade mein pehle se stored hain (stop_loss, target_price).
-            # Extra context ke liye notes use karo.
+            status         = BrokerOrder.Status.PENDING,
             notes          = (
                 f"lots={lots} | type={option_type} | "
                 f"strike={contract.strike} | expiry={contract.expiry.isoformat()} | "
@@ -606,21 +575,21 @@ def place_live_option_trade(
             ),
         )
 
-    # ── 4. Celery task — broker ko bhejo ─────────────────────────────────────
+    # ── 5. Celery task — broker ko bhejo ──────────────────────────────────────
     place_broker_order.apply_async(
         args  = [str(broker_order.id)],
         queue = "orders",
     )
 
     logger.info(
-        "Live OptionTrade queued | trade=%s | %s %s%s @ %.2f | lots=%d | broker_order=%s",
-        trade.id, action.upper(), symbol_name, option_type,
+        "Live option Order queued | order=%s | %s %s%s @ %.2f | lots=%d | broker_order=%s",
+        order.id, action.upper(), symbol_name, option_type,
         entry_price, lots, broker_order.id,
     )
 
     return {
         "success":         True,
-        "option_trade_id": str(trade.id),
+        "trade_id":        str(order.id),
         "broker_order_id": str(broker_order.id),
         "contract":        contract.fyers_symbol,
         "strike":          contract.strike,

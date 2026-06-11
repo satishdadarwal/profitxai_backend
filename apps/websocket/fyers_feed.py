@@ -204,10 +204,11 @@ class FyersFeedManager:
 
         if not self._subscribed:
             try:
-                from apps.paper_trading.models import PaperTrade
-                open_symbols = PaperTrade.objects.filter(
-                    status='open'
-                ).values_list('symbol', flat=True).distinct()
+                from apps.orders.models import Order
+                open_symbols = Order.objects.filter(
+                    mode=Order.Mode.PAPER,
+                    status=Order.Status.OPEN,
+                ).values_list('symbol_display', flat=True).distinct()
                 for sym in open_symbols:
                     # Crypto symbols skip karo — Fyers support nahi karta
                     if "-USDT" in sym.upper() or "-USD" in sym.upper() or "USDT" in sym.upper():
@@ -589,7 +590,7 @@ class FyersFeedManager:
         try:
             from decimal import Decimal
             from apps.market.models import Asset
-            from apps.paper_trading.models import PaperTrade
+            from apps.orders.models import Order
 
             ltp_dec = Decimal(str(ltp))
 
@@ -626,8 +627,10 @@ class FyersFeedManager:
                 Asset.objects.filter(pk=asset.pk).update(last_price=ltp_dec)
 
             symbol_suffix = fyers_symbol.split(":")[-1]
-            PaperTrade.objects.filter(
-                status="open", symbol=symbol_suffix,
+            Order.objects.filter(
+                mode=Order.Mode.PAPER,
+                status=Order.Status.OPEN,
+                symbol_display=symbol_suffix,
             ).update(current_price=ltp_dec)
 
         except Exception as e:
@@ -693,23 +696,25 @@ class FyersFeedManager:
     def _check_sl_tp(self, fyers_symbol: str, ltp: float):
         try:
             from decimal import Decimal
-            from apps.paper_trading.models import PaperTrade
+            from apps.orders.models import Order
             from apps.paper_trading.services import close_trade
 
-            open_trades = PaperTrade.objects.filter(
-                status="open"
-            ).select_related("account")
+            open_trades = Order.objects.filter(
+                mode=Order.Mode.PAPER,
+                status=Order.Status.OPEN,
+            ).select_related("user")
 
             for trade in open_trades:
+                trade_sym = trade.symbol_display or ""
                 if not (
-                    trade.symbol == fyers_symbol
-                    or trade.symbol in fyers_symbol
-                    or fyers_symbol.endswith(trade.symbol)
+                    trade_sym == fyers_symbol
+                    or trade_sym in fyers_symbol
+                    or fyers_symbol.endswith(trade_sym)
                 ):
                     continue
 
                 price = Decimal(str(ltp))
-                sl    = trade.stop_loss
+                sl    = trade.sl_price
                 tp    = trade.target_price
                 side  = trade.side
 

@@ -1,17 +1,18 @@
 import logging
 from collections import defaultdict
+from decimal import Decimal
 
 from django.contrib.auth import get_user_model
+from django.utils import timezone
 
 from asgiref.sync import async_to_sync
 from celery import shared_task
 from channels.layers import get_channel_layer
 
-from apps.brokers.models import BrokerAccount  # ✅ moved to top-level import
+from apps.brokers.models import BrokerAccount
 from broker_adapters.fyers.adapter import FyersAdapter
 
-from .models import OptionTrade
-from .services import check_sltp_for_trade, close_trade, estimate_premium, update_trailing_sl
+from .services import estimate_premium
 
 logger = logging.getLogger(__name__)
 User = get_user_model()
@@ -21,27 +22,30 @@ User = get_user_model()
 def update_spot_and_check_sltp():
     """
     Celery Beat har 10 second pe chalayega.
-    Sabhi users ke open trades ek saath check honge.
+    Sabhi users ke open option orders ek saath check honge.
+    Uses Order model (canonical).
     """
-    open_trades = OptionTrade.objects.filter(
-        status="open", mode__in=["paper", "live"]
-    ).select_related("user", "symbol", "contract")
+    from apps.orders.models import Order
 
-    if not open_trades.exists():
+    open_orders = Order.objects.filter(
+        status="open", instrument_type="options"
+    ).select_related("user", "asset")
+
+    if not open_orders.exists():
         return
 
-    # Group trades by user
-    trades_by_user: dict[int, list] = defaultdict(list)
-    for trade in open_trades:
-        trades_by_user[trade.user.pk].append(trade)  # ✅ use pk (int), not user object
+    # Group orders by user
+    orders_by_user: dict[int, list] = defaultdict(list)
+    for order in open_orders:
+        orders_by_user[order.user.pk].append(order)
 
     channel_layer = get_channel_layer()
 
-    for user_pk, trades in trades_by_user.items():
+    for user_pk, orders in orders_by_user.items():
         # Get this user's Fyers credentials
         try:
             broker_account = BrokerAccount.objects.get(
-                user_id=user_pk,           # ✅ user_id (int FK column) — no Pylance issue
+                user_id=user_pk,
                 broker="fyers",
                 is_active=True,
             )
@@ -52,7 +56,6 @@ def update_spot_and_check_sltp():
             logger.warning(f"BrokerAccount lookup failed for user_id={user_pk}: {e}")
             continue
 
-        # ✅ Build credentials dict from actual model fields (no .credentials attr)
         credentials = {
             "app_id": broker_account.app_id,
             "access_token": broker_account.access_token or "",
@@ -62,8 +65,8 @@ def update_spot_and_check_sltp():
 
         client = FyersAdapter(credentials=credentials)
 
-        # Collect symbols for this user's trades
-        symbols_needed = list({t.symbol.fyers_symbol for t in trades})
+        # Collect symbols for this user's orders
+        symbols_needed = list({o.symbol_display for o in orders if o.symbol_display})
         spot_map: dict[str, float] = {}
 
         try:
@@ -75,39 +78,49 @@ def update_spot_and_check_sltp():
         except Exception as e:
             logger.warning(f"Bulk quote fetch failed for user_id={user_pk}: {e}")
 
-        for trade in trades:
-            spot = spot_map.get(trade.symbol.fyers_symbol)
-            if not spot:
+        for order in orders:
+            symbol_key = order.symbol_display
+            current_price = spot_map.get(symbol_key)
+            if not current_price:
                 continue
 
-            current_premium = estimate_premium(
-                spot=spot,
-                strike=trade.contract.strike,
-                option_type=trade.contract.option_type,
-                entry_spot=trade.entry_spot,
-                entry_premium=trade.entry_price,
-            )
+            # Update current price
+            order.current_price = Decimal(str(current_price))
+            order.save(update_fields=["current_price", "updated_at"])
 
-            trade.current_price = current_premium
-            trade.current_spot = spot
-            trade.save(update_fields=["current_price", "current_spot"])
-            
-            update_trailing_sl(trade, current_premium)
-            result = check_sltp_for_trade(trade, current_premium)
+            # Check SL/TP
+            sl = order.sl_price
+            tp = order.target_price
+            side = order.side
+            entry = order.entry_price
+
+            result = None
+            if side == "buy":
+                if sl and current_price <= float(sl):
+                    result = {"reason": "SL", "exit_price": float(sl)}
+                elif tp and current_price >= float(tp):
+                    result = {"reason": "TP", "exit_price": float(tp)}
+            else:  # sell
+                if sl and current_price >= float(sl):
+                    result = {"reason": "SL", "exit_price": float(sl)}
+                elif tp and current_price <= float(tp):
+                    result = {"reason": "TP", "exit_price": float(tp)}
 
             if not channel_layer:
                 logger.warning("Channel layer not configured — skipping WebSocket push.")
+                if result:
+                    _close_order(order, result["exit_price"], result["reason"])
                 continue
 
-            user_group = f"user_{trade.user.pk}"  # ✅ pk instead of .id
+            user_group = f"user_{order.user.pk}"
 
             if result:
-                pnl = close_trade(trade, result["exit_price"], result["reason"])
+                pnl = _close_order(order, result["exit_price"], result["reason"])
                 async_to_sync(channel_layer.group_send)(
                     user_group,
                     {
                         "type": "trade.closed",
-                        "trade_id": str(trade.pk),   # ✅ pk
+                        "trade_id": str(order.pk),
                         "reason": result["reason"],
                         "exit_price": result["exit_price"],
                         "pnl": pnl,
@@ -118,11 +131,42 @@ def update_spot_and_check_sltp():
                     user_group,
                     {
                         "type": "trade.price_update",
-                        "trade_id": str(trade.pk),   # ✅ pk
-                        "current_price": current_premium,
-                        "current_spot": spot,
+                        "trade_id": str(order.pk),
+                        "current_price": current_price,
                     },
                 )
+
+
+def _close_order(order, exit_price: float, reason: str) -> float:
+    """Close an Order record and calculate realized PnL."""
+    from apps.orders.models import Order
+
+    if order.status != "open":
+        return 0.0
+
+    entry = float(order.entry_price or 0)
+    qty = float(order.quantity or 0)
+
+    if order.side == "buy":
+        pnl = (exit_price - entry) * qty
+    else:
+        pnl = (entry - exit_price) * qty
+
+    order.status = Order.Status.FILLED
+    order.exit_price = Decimal(str(exit_price))
+    order.exit_time = timezone.now()
+    order.exit_reason = reason
+    order.realized_pnl = Decimal(str(round(pnl, 2)))
+    order.save(update_fields=[
+        "status", "exit_price", "exit_time", "exit_reason",
+        "realized_pnl", "updated_at"
+    ])
+
+    logger.info(
+        "Order closed | id=%s | mode=%s | reason=%s | pnl=%.2f",
+        order.id, order.mode, reason, pnl,
+    )
+    return pnl
 
 
 @shared_task(bind=True, max_retries=3)
@@ -131,7 +175,6 @@ def run_backtest_task(self, run_id: str):
     BacktestRun ko async process karo.
     views.py: run_backtest_task.delay(str(run.id))
     """
-    from django.utils import timezone
     from apps.options.models import BacktestRun
 
     try:
@@ -164,7 +207,6 @@ def run_backtest_task(self, run_id: str):
                 "max_drawdown": 0,
             }
 
-        # BacktestRun ke actual fields mein save karo
         run.status = BacktestRun.COMPLETED
         run.completed_at = timezone.now()
         run.total_trades = result.get("total_trades", 0)
@@ -184,18 +226,17 @@ def run_backtest_task(self, run_id: str):
 
     except Exception as exc:
         logger.error("Backtest failed | run=%s | err=%s", run_id, exc)
+        from apps.options.models import BacktestRun
         BacktestRun.objects.filter(pk=run_id).update(
             status=BacktestRun.FAILED,
             error_message=str(exc)[:500],
         )
         raise self.retry(exc=exc, countdown=10)
-    
+
+
 @shared_task(bind=True, max_retries=3)
 def place_broker_order(self, order_data: dict):
-    """
-    Async broker order placement
-    """
-
+    """Async broker order placement"""
     try:
         broker_name = order_data.get("broker", "fyers")
         credentials = order_data.get("credentials", {})
@@ -230,28 +271,6 @@ def place_broker_order(self, order_data: dict):
     except Exception as exc:
         logger.error(f"place_broker_order failed: {exc}")
         raise self.retry(exc=exc, countdown=5)
-
-@shared_task(name="options.generate_options_predictions", queue="default")
-def generate_options_predictions():
-    """Run every 30 min during market hours."""
-    from apps.options.options_prediction import generate_options_prediction
-    from django.contrib.auth import get_user_model
-    User = get_user_model()
-
-    user = User.objects.filter(is_staff=True).first() or User.objects.first()
-    symbols = ["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"]
-    results = []
-
-    for symbol in symbols:
-        try:
-            pred = generate_options_prediction(symbol_name=symbol, user=user)
-            if pred:
-                results.append({"symbol": symbol, "direction": pred.direction})
-                logger.info("Options prediction | %s | %s", symbol, pred.direction)
-        except Exception as e:
-            logger.error("Options prediction failed | %s | %s", symbol, e)
-
-    return results
 
 
 @shared_task(name="options.generate_options_predictions", queue="default")
