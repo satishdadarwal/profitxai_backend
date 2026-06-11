@@ -11,7 +11,7 @@ from django.views import View
 from django.views.generic import DetailView, ListView
 
 from apps.market.models import Asset
-from apps.orders.models import Order, Trade
+from apps.orders.models import Order
 from apps.wallet.models import Transaction, Wallet
 
 User = get_user_model()
@@ -49,16 +49,8 @@ class AdminDashboardView(AdminRequiredMixin, View):
         new_users_30d = User.objects.filter(date_joined__date__gte=last_30).count()
         active_users = User.objects.filter(is_active=True).count()
 
-        # ── Trade stats ─────────────────────────────────────────
-        trades_today = Trade.objects.filter(created_at__date=today)
-        trade_volume_30d = (
-            Trade.objects.filter(created_at__date__gte=last_30).aggregate(
-                total=Sum("amount")
-            )["total"]
-            or 0
-        )
-
         # ── Order stats ─────────────────────────────────────────
+        orders_today = Order.objects.filter(created_at__date=today)
         open_orders = Order.objects.filter(status="open").count()
         filled_today = Order.objects.filter(
             status="filled", updated_at__date=today
@@ -68,16 +60,13 @@ class AdminDashboardView(AdminRequiredMixin, View):
             "total_users": total_users,
             "new_users_30d": new_users_30d,
             "active_users": active_users,
-            "total_trades": Trade.objects.count(),
-            "trades_today": trades_today.count(),
-            "trade_volume_30d": trade_volume_30d,
+            "total_trades": Order.objects.count(),
+            "trades_today": orders_today.count(),
+            "trade_volume_30d": 0,
             "open_orders": open_orders,
             "filled_today": filled_today,
-            # Recent feeds
             "recent_trades": (
-                Trade.objects.select_related("user", "asset").order_by("-created_at")[
-                    :10
-                ]
+                Order.objects.select_related("user", "asset").order_by("-created_at")[:10]
             ),
             "recent_users": User.objects.order_by("-date_joined")[:5],
         }
@@ -144,7 +133,7 @@ class AdminUserDetailView(AdminRequiredMixin, DetailView):
 
         ctx["wallet"] = Wallet.objects.filter(user=user).first()
         ctx["trades"] = (
-            Trade.objects.filter(user=user)
+            Order.objects.filter(user=user)
             .select_related("asset")
             .order_by("-created_at")[:20]
         )
@@ -174,23 +163,13 @@ class AdminUserToggleActiveView(AdminRequiredMixin, View):
 # ─────────────────────────────────────────────────────────────────
 
 class AdminTradeListView(AdminRequiredMixin, ListView):
-    """
-    All trades — filter by asset, side (buy/sell), date range.
-    Query params:
-      ?asset=BTC
-      ?side=buy|sell
-      ?from_date=YYYY-MM-DD
-      ?to_date=YYYY-MM-DD
-      ?user_id=<int>
-    """
-
-    model = Trade
+    model = Order
     template_name = "admin_panel/trades/list.html"
     context_object_name = "trades"
     paginate_by = 30
 
     def get_queryset(self):
-        qs = Trade.objects.select_related("user", "asset").order_by("-created_at")
+        qs = Order.objects.select_related("user", "asset").order_by("-created_at")
 
         if asset := self.request.GET.get("asset"):
             qs = qs.filter(asset__symbol__iexact=asset)
@@ -219,14 +198,12 @@ class AdminTradeListView(AdminRequiredMixin, ListView):
                 "to_date": self.request.GET.get("to_date", ""),
             }
         )
-        # Aggregate volume for current filtered queryset
-        qs = self.get_queryset()
-        ctx["total_volume"] = self.get_queryset().aggregate(v=Sum("amount"))["v"] or 0
+        ctx["total_volume"] = 0
         return ctx
 
 
 class AdminTradeDetailView(AdminRequiredMixin, DetailView):
-    model = Trade
+    model = Order
     template_name = "admin_panel/trades/detail.html"
     context_object_name = "trade"
     pk_url_kwarg = "trade_id"

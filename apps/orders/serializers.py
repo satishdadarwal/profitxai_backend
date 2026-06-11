@@ -1,14 +1,25 @@
 # apps/orders/serializers.py
-# UPDATED VERSION - WITH NOTES, TAGS, EMOJI_REACTION + POSITION SERIALIZERS
+from decimal import Decimal
 
 from rest_framework import serializers
-from .models import Order, Trade, TradeJournalEntry, Position
+from .models import Order, TradeJournalEntry, Position
+
+# ──────────────────────────────────────────────
+# Helpers
+# ──────────────────────────────────────────────
+
+_INDIAN_INSTRUMENT_TYPES = frozenset(["options", "futures", "equity", "index", ""])
+
+
+def _order_market_type(obj: Order) -> str:
+    """Map Order.instrument_type → legacy 'indian' / 'crypto' label."""
+    return "crypto" if obj.instrument_type == "crypto" else "indian"
 
 
 class OrderSerializer(serializers.ModelSerializer):
     symbol = serializers.CharField(source='asset.symbol', read_only=True)
     asset_name = serializers.CharField(source='asset.name', read_only=True)
-    
+
     class Meta:
         model = Order
         fields = [
@@ -28,101 +39,127 @@ class OrderSerializer(serializers.ModelSerializer):
 
 class TradeSerializer(serializers.ModelSerializer):
     """
-    Unified Trade serializer supporting both Indian and Crypto markets.
-    Includes journal fields: notes, tags, emoji_reaction
+    Wraps Order but returns the same JSON shape Flutter expects for Trade records.
+    field aliases: price→avg_fill_price, notes→journal_notes, order/order_id→id
     """
     symbol = serializers.CharField(source='asset.symbol', read_only=True)
     asset_name = serializers.CharField(source='asset.name', read_only=True)
-    order_id = serializers.UUIDField(source='order.id', read_only=True)
-    
-    # Computed fields
+    # Order IS the trade — expose its own id under both names for compat
+    order = serializers.UUIDField(source='id', read_only=True)
+    order_id = serializers.UUIDField(source='id', read_only=True)
+    # Derived / computed compat fields
+    price = serializers.SerializerMethodField()
+    amount = serializers.SerializerMethodField()
+    fee = serializers.SerializerMethodField()
+    market_type = serializers.SerializerMethodField()
+    market_display = serializers.SerializerMethodField()
     net_pnl = serializers.SerializerMethodField()
-    market_display = serializers.CharField(source='get_market_type_display', read_only=True)
-    
+    notes = serializers.CharField(source='journal_notes', read_only=True)
+    strike = serializers.SerializerMethodField()
+    leverage = serializers.SerializerMethodField()
+    funding_fee = serializers.SerializerMethodField()
+
     class Meta:
-        model = Trade
+        model = Order
         fields = [
-            # Core
             'id', 'order', 'order_id', 'user', 'asset', 'symbol', 'asset_name',
             'market_type', 'market_display', 'side', 'mode',
-            
-            # Common fields
             'quantity', 'price', 'amount', 'fee', 'realized_pnl', 'net_pnl',
-            
-            # Journal fields (NEW)
             'notes', 'tags', 'emoji_reaction',
-            
-            # Indian market specific
             'strike', 'lots', 'option_type',
-            
-            # Crypto market specific
             'leverage', 'funding_fee',
-            
-            # Timestamps
             'created_at',
         ]
-        read_only_fields = ['id', 'user', 'created_at', 'net_pnl', 'market_display']
-    
+        read_only_fields = ['id', 'user', 'created_at']
+
+    def get_price(self, obj):
+        return obj.avg_fill_price or obj.entry_price or obj.limit_price
+
+    def get_amount(self, obj):
+        price = obj.avg_fill_price or obj.entry_price or obj.limit_price
+        if price is not None and obj.quantity:
+            return float(Decimal(str(price)) * Decimal(str(obj.quantity)))
+        return None
+
+    def get_fee(self, obj):
+        return "0.00000000"
+
+    def get_market_type(self, obj):
+        return _order_market_type(obj)
+
+    def get_market_display(self, obj):
+        return "Crypto Market" if obj.instrument_type == "crypto" else "Indian Market"
+
     def get_net_pnl(self, obj):
-        """Calculate net PnL after fees"""
-        if obj.realized_pnl is None:
-            return None
-        return float(obj.realized_pnl) - float(obj.fee or 0)
+        return float(obj.realized_pnl) if obj.realized_pnl is not None else None
+
+    def get_strike(self, obj):
+        return None
+
+    def get_leverage(self, obj):
+        return None
+
+    def get_funding_fee(self, obj):
+        return None
 
 
 class TradeUpdateSerializer(serializers.ModelSerializer):
-    """Serializer for updating notes/tags/emoji only"""
-    
+    """PATCH journal fields — notes maps to Order.journal_notes for compat."""
+    notes = serializers.CharField(source='journal_notes', required=False, allow_blank=True)
+
     class Meta:
-        model = Trade
+        model = Order
         fields = ['notes', 'tags', 'emoji_reaction']
-    
+
     def validate_tags(self, value):
-        """Ensure tags is a list of strings"""
         if not isinstance(value, list):
             raise serializers.ValidationError("Tags must be a list")
         if not all(isinstance(tag, str) for tag in value):
             raise serializers.ValidationError("All tags must be strings")
         return value
-    
+
     def validate_emoji_reaction(self, value):
-        """Validate emoji is a single character or empty"""
         if value and len(value) > 10:
             raise serializers.ValidationError("Emoji must be max 10 characters")
         return value
 
 
 class TradeJournalEntrySerializer(serializers.ModelSerializer):
-    trade_symbol = serializers.CharField(source='trade.asset.symbol', read_only=True)
-    
+    trade_symbol = serializers.SerializerMethodField()
+
     class Meta:
         model = TradeJournalEntry
         fields = [
-            'id', 'user', 'trade', 'trade_symbol', 'order',
+            'id', 'user', 'order', 'trade_symbol',
             'title', 'body', 'strategy', 'emotion', 'outcome',
             'rating', 'tags', 'screenshot',
-            'created_at', 'updated_at'
+            'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'user', 'created_at', 'updated_at']
 
+    def get_trade_symbol(self, obj):
+        if obj.order:
+            if obj.order.asset_id:
+                return obj.order.asset.symbol if obj.order.asset else ""
+            return obj.order.symbol_display
+        return ""
+
 
 class TradeFilterSerializer(serializers.Serializer):
-    """Serializer for trade filtering query params"""
-    
     market_type = serializers.ChoiceField(
         choices=['indian', 'crypto', 'all'],
         default='all',
-        required=False
+        required=False,
     )
     mode = serializers.ChoiceField(
         choices=['live', 'paper', 'all'],
         default='all',
-        required=False
+        required=False,
     )
     tags = serializers.ListField(
         child=serializers.CharField(),
         required=False,
-        allow_empty=True
+        allow_empty=True,
     )
     emoji = serializers.CharField(required=False, allow_blank=True)
     start_date = serializers.DateField(required=False)

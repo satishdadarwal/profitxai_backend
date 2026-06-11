@@ -523,7 +523,7 @@ def take_performance_snapshots():
 
     from django.db.models import Count, Q, Sum
 
-    from apps.orders.models import Trade
+    from apps.orders.models import Order
 
     from .models import Strategy, StrategyPerformanceSnapshot
 
@@ -555,17 +555,16 @@ def take_performance_snapshots():
             order_ids = signals_qs.exclude(order=None).values_list(
                 "order_id", flat=True
             )
-            trade_agg = Trade.objects.filter(order_id__in=order_ids).aggregate(
+            order_agg = Order.objects.filter(id__in=order_ids).aggregate(
                 total=Count("id"),
                 wins=Count("id", filter=Q(realized_pnl__gt=0)),
                 pnl=Sum("realized_pnl"),
-                fees=Sum("fee"),
             )
 
-            total_t = trade_agg["total"] or 0
-            wins = trade_agg["wins"] or 0
-            pnl = trade_agg["pnl"] or 0
-            fees = trade_agg["fees"] or 0
+            total_t = order_agg["total"] or 0
+            wins = order_agg["wins"] or 0
+            pnl = order_agg["pnl"] or 0
+            fees = 0
             win_rate = (wins / total_t) if total_t else 0
 
             # ✅ FIX: Sirf model ke actual fields use karo

@@ -23,7 +23,7 @@ from apps.websocket.push import (
     push_trade_update,
 )
 
-from .models import Order, Trade
+from .models import Order
 
 User = get_user_model()
 logger = logging.getLogger(__name__)
@@ -306,16 +306,14 @@ def _create_broker_order(
 # ─────────────────────────────────────────────────────────────────
 def fill_order(
     *, order: Order, fill_price: Decimal, fill_qty: Optional[Decimal] = None
-) -> Trade:
+) -> Order:
     """
-    Order ko fully ya partially fill karta hai aur Trade record banata hai.
+    Order ko fully ya partially fill karta hai aur Order record update karta hai.
 
     realized_pnl logic:
     - BUY fill  → entry trade hai, PnL abhi realize nahi hua → None
     - SELL fill → exit trade hai, entry price se PnL calculate karo:
         pnl = (sell_price - avg_entry_price) * qty - fees
-      Agar paired BUY order nahi mila (e.g. fresh short) → 0 store karo,
-      actual PnL position close pe calculate hoga.
     """
     fill_qty = fill_qty or order.remaining_qty
 
@@ -327,7 +325,6 @@ def fill_order(
     amount = (fill_qty * fill_price).quantize(Decimal("0.00000001"))
     fee = (amount * FEE_RATE).quantize(Decimal("0.00000001"))
 
-    # ── realized_pnl calculate karo ─────────────────────────────
     realized_pnl = _calculate_realized_pnl(
         order=order,
         fill_price=fill_price,
@@ -336,23 +333,10 @@ def fill_order(
     )
 
     with db_transaction.atomic():
-        # ── Create trade fill ────────────────────────────────────
-        trade = Trade.objects.create(
-            order=order,
-            user=order.user,
-            asset=order.asset,
-            side=order.side,
-            mode=order.mode,
-            quantity=fill_qty,
-            price=fill_price,
-            amount=amount,
-            fee=fee,
-            realized_pnl=realized_pnl,  # ✅ FIX: ab har trade pe PnL store hoga
-        )
-
-        # ── Update order ─────────────────────────────────────────
         order.filled_qty += fill_qty
         order.avg_fill_price = _weighted_avg_price(order, fill_price, fill_qty)
+        if realized_pnl is not None:
+            order.realized_pnl = realized_pnl
 
         if order.filled_qty >= order.quantity:
             order.status = Order.Status.FILLED
@@ -360,14 +344,12 @@ def fill_order(
             order.status = Order.Status.PARTIAL
 
         order.save(
-            update_fields=["filled_qty", "avg_fill_price", "status", "updated_at"]
+            update_fields=["filled_qty", "avg_fill_price", "status", "realized_pnl", "updated_at"]
         )
 
-        # ── Settle wallet (LIVE only) ────────────────────────────
         if order.mode == Order.Mode.LIVE:
-            _settle_wallet(trade=trade, fee=fee)
+            _settle_wallet(order=order, amount=amount, fee=fee)
 
-        # ── Daily PnL cache invalidate karo (RiskManager use karta hai) ──
         if realized_pnl is not None:
             from django.core.cache import cache
             cache.delete(f"daily_pnl:{order.user_id}:{order.updated_at.date()}")
@@ -377,11 +359,10 @@ def fill_order(
         order.id, fill_qty, fill_price, realized_pnl,
     )
 
-    # ── WebSocket pushes ─────────────────────────────────────────
     _push_order(order)
-    _push_trade(trade)
+    _push_order_fill(order=order, fill_price=fill_price, amount=amount, fee=fee)
 
-    return trade
+    return order
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -488,24 +469,23 @@ def _check_and_lock_funds(
     wallet.save(update_fields=["available_balance", "locked_balance"])
 
 
-def _settle_wallet(*, trade: Trade, fee: Decimal):
-    wallet = Wallet.objects.select_for_update().get(user=trade.user)
+def _settle_wallet(*, order: Order, amount: Decimal, fee: Decimal):
+    wallet = Wallet.objects.select_for_update().get(user=order.user)
 
-    if trade.side == Order.Side.BUY:
-        cost = trade.amount + fee
-        wallet.locked_balance -= cost
+    if order.side == Order.Side.BUY:
+        wallet.locked_balance -= amount + fee
     else:
-        wallet.available_balance += trade.amount - fee
-        wallet.locked_balance -= trade.amount
+        wallet.available_balance += amount - fee
+        wallet.locked_balance -= amount
 
     wallet.save(update_fields=["available_balance", "locked_balance"])
 
     Transaction.objects.create(
         wallet=wallet,
         transaction_type="trade_settlement",
-        amount=trade.amount,
+        amount=amount,
         fee=fee,
-        reference=str(trade.id),
+        reference=str(order.id),
     )
 
 
@@ -604,16 +584,16 @@ def _push_order(order: Order):
     )
 
 
-def _push_trade(trade: Trade):
+def _push_order_fill(*, order: Order, fill_price: Decimal, amount: Decimal, fee: Decimal):
     push_trade_update(
-        user_id=trade.user.pk,
+        user_id=order.user.pk,
         data={
-            "trade_id": str(trade.id),
-            "symbol": trade.asset.symbol,
-            "side": trade.side,
-            "price": str(trade.price),
-            "amount": str(trade.amount),
-            "fee": str(trade.fee),
-            "mode": trade.mode,
+            "trade_id": str(order.id),
+            "symbol": order.asset.symbol if order.asset_id else order.symbol_display,
+            "side": order.side,
+            "price": str(fill_price),
+            "amount": str(amount),
+            "fee": str(fee),
+            "mode": order.mode,
         },
     )

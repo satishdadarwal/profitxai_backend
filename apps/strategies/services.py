@@ -228,17 +228,17 @@ def toggle_mode(strategy: Strategy) -> Strategy:
 #  4. Build Performance
 # ─────────────────────────────────────────────────────────────────
 def build_performance(strategy: Strategy, days: int = 30) -> dict:
-    from apps.orders.models import Trade
+    from apps.orders.models import Order
 
     since = timezone.now() - timedelta(days=days)
-    trades = Trade.objects.filter(order__strategy=strategy, created_at__gte=since)
+    orders = Order.objects.filter(strategy=strategy, created_at__gte=since)
 
-    total_trades = trades.count()
-    winning = trades.filter(realized_pnl__gt=0).count()
-    losing = trades.filter(realized_pnl__lt=0).count()
-    agg = trades.aggregate(total_pnl=Sum("realized_pnl"), total_fees=Sum("fee"))
+    total_trades = orders.count()
+    winning = orders.filter(realized_pnl__gt=0).count()
+    losing = orders.filter(realized_pnl__lt=0).count()
+    agg = orders.aggregate(total_pnl=Sum("realized_pnl"))
     total_pnl = float(agg["total_pnl"] or 0)
-    total_fees = float(agg["total_fees"] or 0)
+    total_fees = 0.0
     win_rate = (winning / total_trades * 100) if total_trades > 0 else 0.0
 
     signals_qs = StrategySignal.objects.filter(strategy=strategy, created_at__gte=since)

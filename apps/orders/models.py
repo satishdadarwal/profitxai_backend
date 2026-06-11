@@ -182,126 +182,6 @@ class Order(models.Model):
         )
 
 
-class Trade(models.Model):
-    """
-    Unified Trade model for both Indian (NSE/Options) and Crypto (Delta Exchange).
-    Order fill record — ek order ke multiple partial fills ho sakte hain.
-    """
-    
-    # ── Market Type ──────────────────────────────────────────────
-    class MarketType(models.TextChoices):
-        INDIAN = "indian", "Indian Market"
-        CRYPTO = "crypto", "Crypto Market"
-
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name="fills")
-    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="trades")
-    asset = models.ForeignKey(
-        "market.Asset", on_delete=models.PROTECT, related_name="trades"
-    )
-    
-    # ── NEW: Market Type Classification ─────────────────────────
-    market_type = models.CharField(
-        max_length=10,
-        choices=MarketType.choices,
-        default=MarketType.INDIAN,
-        db_index=True,
-        help_text="Indian (NSE/Options/Futures) or Crypto (Delta Exchange)"
-    )
-
-    side = models.CharField(max_length=4, choices=Order.Side.choices)
-    mode = models.CharField(
-        max_length=5, choices=Order.Mode.choices, default=Order.Mode.LIVE
-    )
-
-    # ── Common Fields (Both Markets) ────────────────────────────
-    quantity = models.DecimalField(max_digits=20, decimal_places=8)
-    price = models.DecimalField(max_digits=20, decimal_places=8)
-    amount = models.DecimalField(max_digits=20, decimal_places=8)
-    fee = models.DecimalField(max_digits=20, decimal_places=8, default=Decimal("0"))
-
-    realized_pnl = models.DecimalField(
-        max_digits=20, decimal_places=8, null=True, blank=True
-    )
-
-    # ── NEW: Journal Fields ─────────────────────────────────────
-    notes = models.TextField(
-        blank=True,
-        default="",
-        help_text="User's trade notes, strategy explanation, learnings"
-    )
-    
-    tags = models.JSONField(
-        default=list,
-        blank=True,
-        help_text="List of tag strings: ['breakout', 'daily-tf', 'missed-entry']"
-    )
-    
-    emoji_reaction = models.CharField(
-        max_length=10,
-        blank=True,
-        default="",
-        help_text="Single emoji representing trade feeling: 😊, 😢, 🤔, 🔥, etc."
-    )
-
-    # ── Indian Market Specific Fields ──────────────────────────
-    strike = models.DecimalField(
-        max_digits=10,
-        decimal_places=2,
-        null=True,
-        blank=True,
-        help_text="Strike price for options (Indian market only)"
-    )
-    
-    lots = models.IntegerField(
-        null=True,
-        blank=True,
-        help_text="Number of lots (Indian market: 1 lot = lot_size * quantity)"
-    )
-    
-    option_type = models.CharField(
-        max_length=2,
-        choices=[("CE", "Call"), ("PE", "Put")],
-        blank=True,
-        default="",
-        help_text="CE/PE for Indian options"
-    )
-
-    # ── Crypto Market Specific Fields ──────────────────────────
-    leverage = models.DecimalField(
-        max_digits=5,
-        decimal_places=2,
-        null=True,
-        blank=True,
-        help_text="Leverage multiplier (Crypto futures only)"
-    )
-    
-    funding_fee = models.DecimalField(
-        max_digits=20,
-        decimal_places=8,
-        null=True,
-        blank=True,
-        help_text="Funding fee charged/earned (Crypto perpetuals only)"
-    )
-
-    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
-
-    class Meta:
-        ordering = ["-created_at"]
-        indexes = [
-            models.Index(fields=["user", "asset"]),
-            models.Index(fields=["mode", "created_at"]),
-            models.Index(fields=["market_type", "created_at"]),
-            models.Index(fields=["user", "market_type", "created_at"]),
-        ]
-
-    def __str__(self):
-        market_prefix = f"[{self.market_type.upper()}]"
-        return (
-            f"{market_prefix} Trade {self.id} | {self.side} {self.quantity} "
-            f"{self.asset} @ {self.price}"
-        )
-
 
 class TradeJournalEntry(models.Model):
     """User-written journal entry linked to a trade or order."""
@@ -321,9 +201,6 @@ class TradeJournalEntry(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(
         User, on_delete=models.CASCADE, related_name="journal_entries"
-    )
-    trade = models.OneToOneField(
-        Trade, on_delete=models.SET_NULL, null=True, blank=True, related_name="journal"
     )
     order = models.ForeignKey(
         Order,

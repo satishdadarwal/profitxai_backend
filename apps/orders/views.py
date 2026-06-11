@@ -12,7 +12,7 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
-from .models import Order, Trade, TradeJournalEntry
+from .models import Order, TradeJournalEntry
 from .serializers import (
     OrderSerializer,
     TradeSerializer,
@@ -49,151 +49,112 @@ class OrderViewSet(viewsets.ModelViewSet):
         return Response({"status": "ok", "id": str(order.id)})
 
 
+_INDIAN_TYPES = frozenset(["options", "futures", "equity", "index", ""])
+
+
 class TradeViewSet(viewsets.ModelViewSet):
     """
-    Unified Trade ViewSet supporting Indian and Crypto markets.
-    Supports filtering by tags, market_type, mode, dates.
+    Journal ViewSet backed by Order model.
+    Keeps the same URL endpoints (orders/trades/) and response shape
+    that Flutter's journal_provider expects.
     """
     serializer_class = TradeSerializer
     permission_classes = [IsAuthenticated]
-    
+
     def get_queryset(self):
-        queryset = Trade.objects.filter(user=self.request.user).select_related(
-            'asset', 'order'
-        ).order_by('-created_at')
-        
-        # Apply filters from query params
+        queryset = (
+            Order.objects.filter(user=self.request.user)
+            .select_related("asset")
+            .order_by("-created_at")
+        )
+
         filter_serializer = TradeFilterSerializer(data=self.request.query_params)
         if filter_serializer.is_valid():
             data = filter_serializer.validated_data
-            
-            # Market type filter
-            market_type = data.get('market_type', 'all')
-            if market_type != 'all':
-                queryset = queryset.filter(market_type=market_type)
-            
-            # Mode filter
-            mode = data.get('mode', 'all')
-            if mode != 'all':
+
+            market_type = data.get("market_type", "all")
+            if market_type == "indian":
+                queryset = queryset.filter(instrument_type__in=list(_INDIAN_TYPES))
+            elif market_type == "crypto":
+                queryset = queryset.filter(instrument_type="crypto")
+
+            mode = data.get("mode", "all")
+            if mode != "all":
                 queryset = queryset.filter(mode=mode)
-            
-            # Tags filter (OR condition - any matching tag)
-            tags = data.get('tags')
+
+            tags = data.get("tags")
             if tags:
-                # Filter trades that have ANY of the provided tags
                 tag_query = Q()
                 for tag in tags:
                     tag_query |= Q(tags__contains=[tag])
                 queryset = queryset.filter(tag_query)
-            
-            # Emoji filter
-            emoji = data.get('emoji')
+
+            emoji = data.get("emoji")
             if emoji:
                 queryset = queryset.filter(emoji_reaction=emoji)
-            
-            # Date range filter
-            start_date = data.get('start_date')
+
+            start_date = data.get("start_date")
             if start_date:
                 queryset = queryset.filter(created_at__date__gte=start_date)
-            
-            end_date = data.get('end_date')
+
+            end_date = data.get("end_date")
             if end_date:
                 queryset = queryset.filter(created_at__date__lte=end_date)
-            
-            # Has notes filter
-            has_notes = data.get('has_notes')
+
+            has_notes = data.get("has_notes")
             if has_notes is not None:
                 if has_notes:
-                    queryset = queryset.exclude(notes='')
+                    queryset = queryset.exclude(journal_notes="")
                 else:
-                    queryset = queryset.filter(notes='')
-        
+                    queryset = queryset.filter(journal_notes="")
+
         return queryset
-    
+
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)
 
-    @action(detail=True, methods=['patch'])
+    @action(detail=True, methods=["patch"])
     def update_journal(self, request, pk=None):
-        """PATCH /api/trades/{id}/update_journal/ — update notes, tags, emoji_reaction"""
-        trade = self.get_object()
-        serializer = TradeUpdateSerializer(trade, data=request.data, partial=True)
-        
+        order = self.get_object()
+        serializer = TradeUpdateSerializer(order, data=request.data, partial=True)
         if serializer.is_valid():
             serializer.save()
-            return Response(TradeSerializer(trade).data)
-        
+            return Response(TradeSerializer(order).data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-    
-    @action(detail=False, methods=['get'])
+
+    @action(detail=False, methods=["get"])
     def all_tags(self, request):
-        """
-        GET /api/trades/all_tags/
-        Returns list of all unique tags used by user
-        """
-        trades = Trade.objects.filter(user=request.user).exclude(tags=[])
-        all_tags = set()
-        
-        for trade in trades:
-            all_tags.update(trade.tags)
-        
-        return Response({
-            'tags': sorted(list(all_tags))
-        })
-    
-    @action(detail=False, methods=['get'])
+        orders = Order.objects.filter(user=request.user).exclude(tags=[])
+        all_tags: set = set()
+        for order in orders:
+            all_tags.update(order.tags)
+        return Response({"tags": sorted(all_tags)})
+
+    @action(detail=False, methods=["get"])
     def tag_stats(self, request):
-        """
-        GET /api/trades/tag_stats/
-        Returns tag usage statistics
-        """
-        trades = Trade.objects.filter(user=request.user).exclude(tags=[])
-        tag_counts = {}
-        
-        for trade in trades:
-            for tag in trade.tags:
+        orders = Order.objects.filter(user=request.user).exclude(tags=[])
+        tag_counts: dict = {}
+        for order in orders:
+            for tag in order.tags:
                 tag_counts[tag] = tag_counts.get(tag, 0) + 1
-        
-        # Sort by count descending
-        sorted_tags = sorted(
-            tag_counts.items(),
-            key=lambda x: x[1],
-            reverse=True
+        sorted_tags = sorted(tag_counts.items(), key=lambda x: x[1], reverse=True)
+        return Response(
+            {"tag_stats": [{"tag": tag, "count": count} for tag, count in sorted_tags]}
         )
-        
-        return Response({
-            'tag_stats': [
-                {'tag': tag, 'count': count}
-                for tag, count in sorted_tags
-            ]
-        })
 
 
 class TradeJournalEntryViewSet(viewsets.ModelViewSet):
     serializer_class = TradeJournalEntrySerializer
     permission_classes = [IsAuthenticated]
-    
+
     def get_queryset(self):
-        return TradeJournalEntry.objects.filter(
-            user=self.request.user
-        ).select_related('trade', 'order')
-    
+        return (
+            TradeJournalEntry.objects.filter(user=self.request.user)
+            .select_related("order", "order__asset")
+        )
+
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)
-
-    @action(detail=True, methods=['patch'])
-    def update_journal(self, request, pk=None):
-        """PATCH /api/v1/orders/orders/{id}/update_journal/ — notes/tags/emoji save"""
-        order = self.get_object()
-
-        if 'notes' in request.data:
-            order.journal_notes = request.data['notes']
-        if 'tags' in request.data:
-            order.tags = request.data['tags']
-        if 'emoji_reaction' in request.data:
-            order.emoji_reaction = request.data['emoji_reaction']
-        order.save(update_fields=['journal_notes', 'tags', 'emoji_reaction', 'updated_at'])
-        return Response({"status": "ok", "id": str(order.id)})
 # apps/orders/views.py
 # ADD THIS TO EXISTING FILE - Daily Performance Calendar View
 
@@ -360,102 +321,62 @@ class ExportTradesCSVView(APIView):
     
     def get(self, request):
         user = request.user
-        start_date = request.query_params.get('start_date')
-        end_date = request.query_params.get('end_date')
-        market_type = request.query_params.get('market_type', 'all')
-        
-        # Query unified trades
-        trades = Trade.objects.filter(user=user).select_related('asset', 'order')
-        
-        if start_date:
-            trades = trades.filter(created_at__date__gte=start_date)
-        if end_date:
-            trades = trades.filter(created_at__date__lte=end_date)
-        if market_type != 'all':
-            trades = trades.filter(market_type=market_type)
-        
-        # Query option orders from Order model (single source of truth)
-        option_orders = Order.objects.filter(user=user, instrument_type='options').select_related('asset')
-        if start_date:
-            option_orders = option_orders.filter(created_at__date__gte=start_date)
-        if end_date:
-            option_orders = option_orders.filter(created_at__date__lte=end_date)
+        start_date = request.query_params.get("start_date")
+        end_date = request.query_params.get("end_date")
+        market_type = request.query_params.get("market_type", "all")
 
-        # Create CSV
+        orders = Order.objects.filter(user=user).select_related("asset").order_by("created_at")
+        if start_date:
+            orders = orders.filter(created_at__date__gte=start_date)
+        if end_date:
+            orders = orders.filter(created_at__date__lte=end_date)
+        if market_type == "indian":
+            orders = orders.filter(instrument_type__in=list(_INDIAN_TYPES))
+        elif market_type == "crypto":
+            orders = orders.filter(instrument_type="crypto")
+
         output = io.StringIO()
         writer = csv.writer(output)
-        
-        # CSV Headers
         writer.writerow([
-            'Date', 'Market', 'Symbol', 'Side', 'Type', 'Quantity', 'Entry Price',
-            'Exit Price', 'PnL', 'Fee', 'Net PnL', 'Mode', 'Strike', 'Option Type',
-            'Lots', 'Leverage', 'Notes', 'Tags', 'Emoji', 'Status'
+            "Date", "Market", "Symbol", "Side", "Type", "Quantity", "Entry Price",
+            "Exit Price", "PnL", "Fee", "Net PnL", "Mode", "Strike", "Option Type",
+            "Lots", "Leverage", "Notes", "Tags", "Emoji", "Status",
         ])
-        
-        # Write unified trades
-        for trade in trades.order_by('created_at'):
-            net_pnl = float(trade.realized_pnl or 0) - float(trade.fee or 0)
-            tags_str = ', '.join(trade.tags) if trade.tags else ''
-            
+
+        for ord_ in orders:
+            price = float(ord_.avg_fill_price or ord_.entry_price or ord_.limit_price or 0)
+            pnl = float(ord_.realized_pnl or 0)
+            tags_str = ", ".join(ord_.tags) if ord_.tags else ""
+            sym = ord_.symbol_display or (ord_.asset.symbol if ord_.asset else "")
+            ts = ord_.entry_time or ord_.created_at
+            market_label = "Crypto Market" if ord_.instrument_type == "crypto" else "Indian Market"
             writer.writerow([
-                trade.created_at.strftime('%Y-%m-%d %H:%M:%S'),
-                trade.get_market_type_display(),
-                trade.asset.symbol,
-                trade.side.upper(),
-                'TRADE',
-                float(trade.quantity),
-                float(trade.price),
-                '',  # Exit price not tracked in Trade model
-                float(trade.realized_pnl or 0),
-                float(trade.fee),
-                net_pnl,
-                trade.mode.upper(),
-                float(trade.strike) if trade.strike else '',
-                trade.option_type or '',
-                trade.lots or '',
-                float(trade.leverage) if trade.leverage else '',
-                trade.notes,
+                ts.strftime("%Y-%m-%d %H:%M:%S") if ts else "",
+                market_label,
+                sym,
+                ord_.side.upper(),
+                (ord_.instrument_type or "order").upper(),
+                float(ord_.quantity),
+                price,
+                float(ord_.exit_price or 0) or "",
+                pnl,
+                0,
+                pnl,
+                ord_.mode.upper(),
+                "",
+                ord_.option_type or "",
+                ord_.lots or "",
+                "",
+                ord_.journal_notes,
                 tags_str,
-                trade.emoji_reaction,
-                'FILLED',
+                ord_.emoji_reaction,
+                ord_.status.upper(),
             ])
-        
-        # Write option orders (only if market_type is 'all' or 'indian')
-        if market_type in ['all', 'indian']:
-            for ord_ in option_orders.order_by('entry_time'):
-                tags_str = ', '.join(ord_.tags) if ord_.tags else ''
-                pnl_val = float(ord_.realized_pnl or 0)
-                sym_str = ord_.symbol_display or (ord_.asset.symbol if ord_.asset else '')
-                ts = (ord_.entry_time or ord_.created_at)
-                writer.writerow([
-                    ts.strftime('%Y-%m-%d %H:%M:%S') if ts else '',
-                    'Indian Market',
-                    sym_str,
-                    ord_.side.upper(),
-                    'OPTION',
-                    float(ord_.quantity),
-                    float(ord_.entry_price or ord_.limit_price or 0),
-                    float(ord_.exit_price or 0) or '',
-                    pnl_val,
-                    0,
-                    pnl_val,
-                    ord_.mode.upper(),
-                    '',  # strike parsed from symbol_display if needed
-                    ord_.option_type or '',
-                    ord_.lots or '',
-                    '',
-                    ord_.notes,
-                    tags_str,
-                    ord_.emoji_reaction,
-                    ord_.status.upper(),
-                ])
-        
-        # Prepare response
+
         output.seek(0)
-        response = HttpResponse(output.getvalue(), content_type='text/csv')
-        filename = f'profitx_trades_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv'
-        response['Content-Disposition'] = f'attachment; filename="{filename}"'
-        
+        response = HttpResponse(output.getvalue(), content_type="text/csv")
+        filename = f"profitx_trades_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        response["Content-Disposition"] = f'attachment; filename="{filename}"'
         return response
 
 
@@ -469,34 +390,21 @@ class ExportTradesPDFView(APIView):
     
     def get(self, request):
         user = request.user
-        start_date = request.query_params.get('start_date')
-        end_date = request.query_params.get('end_date')
-        market_type = request.query_params.get('market_type', 'all')
-        
-        # Query trades
-        trades = Trade.objects.filter(user=user).select_related('asset', 'order')
-        
-        if start_date:
-            trades = trades.filter(created_at__date__gte=start_date)
-        if end_date:
-            trades = trades.filter(created_at__date__lte=end_date)
-        if market_type != 'all':
-            trades = trades.filter(market_type=market_type)
-        
-        trades = trades.order_by('created_at')
-        
-        # Query closed option orders from Order model
-        option_orders_pdf = Order.objects.filter(
-            user=user, instrument_type='options', status__in=['filled', 'cancelled'],
-        ).select_related('asset')
-        if start_date:
-            option_orders_pdf = option_orders_pdf.filter(created_at__date__gte=start_date)
-        if end_date:
-            option_orders_pdf = option_orders_pdf.filter(created_at__date__lte=end_date)
-        option_orders_pdf = list(option_orders_pdf.order_by('entry_time'))
+        start_date = request.query_params.get("start_date")
+        end_date = request.query_params.get("end_date")
+        market_type = request.query_params.get("market_type", "all")
 
-        # Calculate statistics
-        stats = self._calculate_statistics(trades, option_orders_pdf, market_type)
+        orders = Order.objects.filter(user=user).select_related("asset").order_by("created_at")
+        if start_date:
+            orders = orders.filter(created_at__date__gte=start_date)
+        if end_date:
+            orders = orders.filter(created_at__date__lte=end_date)
+        if market_type == "indian":
+            orders = orders.filter(instrument_type__in=list(_INDIAN_TYPES))
+        elif market_type == "crypto":
+            orders = orders.filter(instrument_type="crypto")
+
+        stats = self._calculate_statistics(list(orders), market_type)
         
         # Create PDF
         buffer = io.BytesIO()
@@ -563,22 +471,11 @@ class ExportTradesPDFView(APIView):
         
         return response
     
-    def _calculate_statistics(self, trades, option_trades, market_type):
-        """Calculate trading statistics from trades"""
+    def _calculate_statistics(self, orders, market_type):
         all_pnls = []
-        
-        # Process unified trades
-        for trade in trades:
-            if trade.realized_pnl is not None:
-                pnl = float(trade.realized_pnl) - float(trade.fee or 0)
-                all_pnls.append(pnl)
-        
-        # Process option orders (Order model uses realized_pnl)
-        if market_type in ['all', 'indian']:
-            for trade in option_trades:
-                pnl = getattr(trade, 'pnl', None) or getattr(trade, 'realized_pnl', None)
-                if pnl is not None:
-                    all_pnls.append(float(pnl))
+        for order in orders:
+            if order.realized_pnl is not None:
+                all_pnls.append(float(order.realized_pnl))
         
         if not all_pnls:
             return self._empty_stats()

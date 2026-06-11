@@ -247,22 +247,17 @@ class Command(BaseCommand):
                 f"avg_fill_price={broker_order.avg_fill_price}"
             ))
 
-            # ── Step 5: Trade record check ────────────────────────────────────
-            self.stdout.write("\n[6/7] Trade record verify karo...")
-
-            from apps.orders.models import Trade
-            trades = Trade.objects.filter(order=order_obj)
-
-            if trades.exists():
-                t = trades.first()
+            # ── Step 5: Order fill check ──────────────────────────────────────
+            self.stdout.write("\n[6/7] Order fill verify karo...")
+            order_obj.refresh_from_db()
+            if order_obj.avg_fill_price:
                 self.stdout.write(self.style.SUCCESS(
-                    f"  ✅ Trade created | id={t.id} | qty={t.quantity} @ {t.price} | "
-                    f"mode={t.mode} | realized_pnl={t.realized_pnl}"
+                    f"  ✅ Order filled | avg_fill_price={order_obj.avg_fill_price} | "
+                    f"filled_qty={order_obj.filled_qty} | status={order_obj.status}"
                 ))
             else:
                 self.stdout.write(self.style.WARNING(
-                    "  ⚠️  No Trade record found — fill_order() ne Trade create nahi kiya. "
-                    "fill_order() mein bug hai."
+                    "  ⚠️  Order not filled — avg_fill_price missing."
                 ))
 
             # ── Step 6: Wallet check (paper = no settlement) ──────────────────

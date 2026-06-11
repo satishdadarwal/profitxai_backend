@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import Order, Trade, TradeJournalEntry
+from .models import Order, TradeJournalEntry
 
 
 @admin.register(Order)
@@ -44,25 +44,6 @@ class OrderAdmin(admin.ModelAdmin):
 
     mark_cancelled.short_description = "Mark selected orders as Cancelled"
 
-
-@admin.register(Trade)
-class TradeAdmin(admin.ModelAdmin):
-    list_display = (
-        "id",
-        "order",
-        "user",
-        "asset",
-        "side",
-        "quantity",
-        "price",
-        "amount",
-        "fee",
-        "realized_pnl",
-        "created_at",
-    )
-    list_filter = ("side", "asset", "mode")
-    search_fields = ("user__username", "asset__symbol")
-    ordering = ("-created_at",)
 
 
 @admin.register(TradeJournalEntry)
