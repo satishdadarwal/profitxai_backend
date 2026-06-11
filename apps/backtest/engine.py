@@ -745,7 +745,14 @@ class VixGreeksExpiryBuyerAlgo(BaseAlgo):
                         _user = acc.user if acc else None
                     except Exception:
                         _user = None
-                chain = fetch_nse_option_chain(symbol=symbol, expiry_ts="", user=_user)
+                import signal as _sig
+                def _th(s,f): raise TimeoutError("chain timeout")
+                _sig.signal(_sig.SIGALRM, _th)
+                _sig.alarm(8)
+                try:
+                    chain = fetch_nse_option_chain(symbol=symbol, expiry_ts="", user=_user)
+                finally:
+                    _sig.alarm(0)
                 if chain:
                     chain_data = chain.get("chain", [])
                     pcr_data = compute_pcr(chain_data)
