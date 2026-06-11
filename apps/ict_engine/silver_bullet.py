@@ -430,13 +430,14 @@ class SilverBullet2MStrategy:
                 _ema4h_val = float(_ema4h.iloc[-1])
                 _bias4h = "bullish" if _close4h > _ema4h_val else "bearish"
                 if _bias4h != bias:
-                    logger.info(
-                        "[%s] 4H bias %s conflicts with %s bias — skip",
+                    logger.warning(
+                        "[%s] 4H bias %s conflicts with %s bias — proceeding anyway",
                         symbol, _bias4h, bias
                     )
-                    return None
-                _4h_bias_ok = True
-                logger.info("[%s] 4H bias ✅ %s aligns with entry", symbol, _bias4h)
+                    _4h_bias_ok = False  # no A+ bonus
+                else:
+                    _4h_bias_ok = True
+                    logger.info("[%s] 4H bias ✅ %s aligns with entry", symbol, _bias4h)
         except Exception as _4he:
             logger.debug("[%s] 4H bias check error: %s", symbol, _4he)
 

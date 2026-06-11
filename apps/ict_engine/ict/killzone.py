@@ -14,6 +14,9 @@ class KZName(str, Enum):
     NEW_YORK_OPEN = "new_york_open"
     NEW_YORK_PM = "new_york_pm"
     LONDON_NY_OVERLAP = "london_ny_overlap"
+    INDIA_OPENING = "india_opening"
+    INDIA_MID = "india_mid"
+    INDIA_CLOSING = "india_closing"
 
 
 KZ_PRIORITY = {
@@ -22,6 +25,9 @@ KZ_PRIORITY = {
     KZName.LONDON_OPEN: 8.0,
     KZName.LONDON_CLOSE: 6.0,
     KZName.NEW_YORK_PM: 5.0,
+    KZName.INDIA_OPENING: 9.0,
+    KZName.INDIA_CLOSING: 8.0,
+    KZName.INDIA_MID: 6.0,
     KZName.ASIAN_RANGE: 3.0,
 }
 
@@ -32,6 +38,9 @@ KZ_WINDOWS = {
     KZName.LONDON_NY_OVERLAP: (12, 13),
     KZName.NEW_YORK_OPEN: (12, 15),
     KZName.NEW_YORK_PM: (15, 16),
+    KZName.INDIA_OPENING: (3, 5),
+    KZName.INDIA_MID: (5, 7),
+    KZName.INDIA_CLOSING: (8, 10),
 }
 
 
