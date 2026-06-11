@@ -185,8 +185,9 @@ class LiveOptionTradeView(APIView):
     """
     POST /api/options/live-trade/
     GET  /api/options/live-trade/
-    
-    Place and manage live option trades via connected broker (Fyers/Zerodha)
+
+    Place and manage live option trades via connected broker (Fyers/Zerodha).
+    Trades are stored as Order(mode='live', instrument_type='options').
     """
     permission_classes = [IsAuthenticated]
     
@@ -510,8 +511,8 @@ class LiveOptionTradeView(APIView):
 class LiveOptionTradeCloseView(APIView):
     """
     POST /api/options/live-trade/<trade_id>/close/
-    
-    Manually close an open live trade by placing reverse order
+
+    Manually close an open live Order by placing a reverse broker order.
     """
     permission_classes = [IsAuthenticated]
 
@@ -630,8 +631,9 @@ class PaperTradeView(APIView):
     POST /api/options/paper-trade/
     GET  /api/options/paper-trade/
     DELETE /api/options/paper-trade/<trade_id>/
-    
-    Paper trading without real money - practice trading system
+
+    Paper option trading (no real money).
+    Trades are stored as Order(mode='paper', instrument_type='options').
     """
     permission_classes = [IsAuthenticated]
     

@@ -5,9 +5,9 @@ from apps.orders.models import Order
 
 
 # ─────────────────────────────────────────────
-# PAPER TRADE SERIALIZER (wraps Order model)
+# ORDER SERIALIZER (paper trading view)
 # ─────────────────────────────────────────────
-class PaperTradeSerializer(serializers.ModelSerializer):
+class OrderSerializer(serializers.ModelSerializer):
     """Serialize Order records that have mode=paper."""
 
     unrealized_pnl = serializers.SerializerMethodField()
@@ -243,11 +243,11 @@ class PaperAccountSerializer(serializers.ModelSerializer):
     # ───────── Trades ─────────
     def get_open_trades(self, obj):
         qs = obj._paper_orders().filter(status="open")[:20]
-        return PaperTradeSerializer(qs, many=True).data
+        return OrderSerializer(qs, many=True).data
 
     def get_closed_trades(self, obj):
         qs = obj._paper_orders().filter(status="filled").order_by("-exit_time")[:50]
-        return PaperTradeSerializer(qs, many=True).data
+        return OrderSerializer(qs, many=True).data
 
     # ───────── Risk Status ─────────
     def get_can_trade(self, obj):

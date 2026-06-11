@@ -6,7 +6,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from .models import PaperAccount, normalize_symbol
-from .serializers import PaperAccountSerializer, PaperTradeSerializer
+from .serializers import PaperAccountSerializer, OrderSerializer
 from .services import close_trade, open_trade, reset_account, topup_account
 
 
@@ -188,7 +188,7 @@ class OpenTradeView(APIView):
             order = open_trade(request.user, request.data)
             return Response({
                 "success": True,
-                "trade": PaperTradeSerializer(order).data,
+                "trade": OrderSerializer(order).data,
                 "message": "Trade opened"
             })
         except Exception as e:
@@ -231,7 +231,7 @@ class CloseTradeView(APIView):
 
             return Response({
                 "success": True,
-                "trade": PaperTradeSerializer(order).data,
+                "trade": OrderSerializer(order).data,
                 "pnl": float(order.realized_pnl or 0),
                 "message": "Trade closed",
             })
@@ -342,7 +342,7 @@ class TradeListView(APIView):
         qs = qs[:limit]
 
         return Response({
-            "trades": PaperTradeSerializer(qs, many=True).data,
+            "trades": OrderSerializer(qs, many=True).data,
             "count": total_count,
             "status_filter": trade_status,
         })
