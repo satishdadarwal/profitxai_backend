@@ -183,14 +183,14 @@ class ScreenerSignalPipeline:
         )
 
         # LiveSignal PENDING status mein save karo
-        signal_obj, created = LiveSignal.objects.get_or_create(
+        signal_obj, created = LiveSignal.objects.update_or_create(
             user=user,
             symbol=sig["symbol"],
             direction=sig["direction"],
-            entry_price=Decimal(str(sig["entry_price"])),
             status="pending",
             defaults=dict(
                 session=session,
+                entry_price=Decimal(str(sig["entry_price"])),
                 signal_type=sig.get("setup_type", "ICT"),
                 strength=min(100, int(sig.get("confluence", 60))),
                 stop_loss=Decimal(str(sig["stop_loss"])),
