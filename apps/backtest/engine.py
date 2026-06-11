@@ -735,21 +735,33 @@ class VixGreeksExpiryBuyerAlgo(BaseAlgo):
             iv_rank = None
 
             try:
-                chain = fetch_nse_option_chain(symbol=symbol, expiry_ts="", user=None)
+                # user inject karo strategy se — authenticated fetch ke liye
+                _user = getattr(strategy, 'user', None) if strategy else None
+                if _user is None:
+                    try:
+                        from apps.brokers.models import BrokerAccount
+                        acc = BrokerAccount.objects.filter(broker='fyers', is_active=True, is_verified=True).first()
+                        _user = acc.user if acc else None
+                    except Exception:
+                        _user = None
+                chain = fetch_nse_option_chain(symbol=symbol, expiry_ts="", user=_user)
                 if chain:
-                    chain_data = chain.get("data", [])
+                    chain_data = chain.get("chain", [])
                     pcr_data = compute_pcr(chain_data)
                     pcr = pcr_data.get("pcr_oi", 1.0)
                     walls = find_oi_walls(chain_data)
                     call_wall = walls.get("call_wall", 0)
                     put_wall  = walls.get("put_wall", 0)
-                    max_pain  = compute_max_pain(chain_data) or price
+                    spot = float(chain.get("spot") or price)
+                    price = spot
+                    max_pain  = compute_max_pain(chain_data) or spot
 
                     # ATM greeks
-                    atm_strike = int(round(price / 50) * 50)
-                    expiry_str = chain.get("expiry", "")
+                    atm_strike = int(round(spot / 100) * 100)
+                    expiries = chain.get("raw_expiry_data", [])
+                    expiry_str = expiries[0].get("date", "") if expiries else ""
                     if expiry_str:
-                        g = greeks_from_chain(price, atm_strike, expiry_str)
+                        g = greeks_from_chain(spot, atm_strike, expiry_str)
                         ce_delta = g.get("ce_delta", 0.45)
                         pe_delta = g.get("pe_delta", -0.45)
                         theta    = g.get("theta", -5.0)
