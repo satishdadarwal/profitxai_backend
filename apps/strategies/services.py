@@ -755,6 +755,8 @@ def _execute_cycle_inner(strategy, target_symbol: str) -> "AlgoSignal":
                         dte = 7 - dte
 
                     extra_kwargs = {
+                        "symbol": target_symbol,
+                        "price": price,
                         "spot": spot,
                         "candles_5m": ltf_candles,
                         "candles_15m": mtf_candles,
