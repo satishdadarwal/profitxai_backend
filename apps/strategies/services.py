@@ -708,10 +708,84 @@ def _execute_cycle_inner(strategy, target_symbol: str) -> "AlgoSignal":
 
     try:
         algo = get_algo(strategy.algo_name, strategy.parameters)
-        signal = algo.generate_signal(
-            symbol=target_symbol, price=price, strategy=strategy,
-            htf=htf_candles, mtf=mtf_candles, ltf=ltf_candles,
-        )
+
+        # ── VIX Greeks: extra params inject karo ─────────────────
+        extra_kwargs = {}
+        if strategy.algo_name == "vix_greeks_expiry_buyer":
+            try:
+                from apps.options.nse_fetcher import fetch_nse_option_chain
+                from apps.options.signal_engine import compute_pcr, find_oi_walls, compute_max_pain
+                from apps.risk.manager import RiskManager
+                from django.core.cache import cache
+
+                # VIX fetch
+                vix_val = cache.get(f"india_vix:{strategy.user_id}")
+                if not vix_val:
+                    try:
+                        from apps.strategies.fyers_utils import fetch_live_quote
+                        q = fetch_live_quote("INDIAVIX", strategy.user)
+                        vix_val = float(q.get("ltp") or q.get("close") or 14.0)
+                        cache.set(f"india_vix:{strategy.user_id}", vix_val, timeout=60)
+                    except Exception:
+                        vix_val = 14.0
+
+                # Option chain data
+                try:
+                    chain_data = fetch_nse_option_chain(target_symbol, user=strategy.user)
+                    chain = chain_data.get("chain", [])
+                    spot = float(chain_data.get("spot_price", float(price)))
+                    pcr_data = compute_pcr(chain)
+                    walls = find_oi_walls(chain)
+                    max_pain = compute_max_pain(chain) or spot
+
+                    import datetime
+                    # DTE calculate karo
+                    from django.utils import timezone
+                    import pytz
+                    ist = pytz.timezone("Asia/Kolkata")
+                    now = timezone.now().astimezone(ist)
+                    # Current week expiry
+                    weekday = now.weekday()
+                    days_map = {"NIFTY": 1, "SENSEX": 3, "BANKNIFTY": 4, "FINNIFTY": 2}
+                    exp_day = days_map.get(target_symbol.upper(), 3)
+                    dte = (exp_day - weekday) % 7
+                    if dte == 0:
+                        dte = 0
+                    elif dte > 4:
+                        dte = 7 - dte
+
+                    extra_kwargs = {
+                        "spot": spot,
+                        "candles_5m": ltf_candles,
+                        "candles_15m": mtf_candles,
+                        "vix": vix_val,
+                        "dte": dte,
+                        "pcr": pcr_data.get("pcr_oi", 1.0),
+                        "max_pain": float(max_pain),
+                        "call_wall": float(walls.get("call_wall", spot * 1.02)),
+                        "put_wall": float(walls.get("put_wall", spot * 0.98)),
+                        "ce_delta": 0.5,
+                        "pe_delta": -0.5,
+                        "theta": -5.0,
+                        "gamma": 0.01,
+                        "parameters": strategy.parameters,
+                    }
+                    logger.info(
+                        "VIX Greeks params | %s | vix=%.1f | dte=%d | pcr=%.2f | spot=%.0f",
+                        target_symbol, vix_val, dte, pcr_data.get("pcr_oi", 0), spot
+                    )
+                except Exception as chain_err:
+                    logger.error("VIX Greeks chain fetch failed: %s", chain_err)
+            except Exception as vix_err:
+                logger.error("VIX Greeks param prep failed: %s", vix_err)
+
+        if extra_kwargs:
+            signal = algo.generate_signal(**extra_kwargs)
+        else:
+            signal = algo.generate_signal(
+                symbol=target_symbol, price=price, strategy=strategy,
+                htf=htf_candles, mtf=mtf_candles, ltf=ltf_candles,
+            )
     except KeyError as e:
         logger.error("Algo not found: %s", e)
         return AlgoSignal(
