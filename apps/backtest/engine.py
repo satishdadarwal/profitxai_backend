@@ -736,7 +736,8 @@ class VixGreeksExpiryBuyerAlgo(BaseAlgo):
 
             try:
                 # user inject karo strategy se — authenticated fetch ke liye
-                _user = getattr(strategy, 'user', None) if strategy else None
+                _user = kwargs.get("strategy", None)
+                _user = getattr(_user, "user", None) if _user else None
                 if _user is None:
                     try:
                         from apps.brokers.models import BrokerAccount
