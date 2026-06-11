@@ -206,7 +206,7 @@ class SetupDetector:
                 break
             if (
                 direction == "short"
-                and sweep.liq_type.value == "BSL"
+                and sweep.liq_type.value == "SSL"
                 and sweep.is_stop_hunt
             ):
                 correct_sweep = True
