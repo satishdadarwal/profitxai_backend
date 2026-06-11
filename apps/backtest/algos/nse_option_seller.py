@@ -182,8 +182,8 @@ def _days_to_expiry(symbol: str) -> int:
     weekday = today.weekday()  # 0=Mon ... 6=Sun
 
     if symbol in ("SENSEX", "BANKEX"):
-        # Friday expiry
-        days_ahead = (4 - weekday) % 7
+        # Thursday expiry (Post SEBI 2025 rules)
+        days_ahead = (3 - weekday) % 7
     elif symbol == "MIDCPNIFTY":
         # Monthly last Thursday — approximate: next Thursday + check if last of month
         days_ahead = (3 - weekday) % 7
@@ -194,11 +194,17 @@ def _days_to_expiry(symbol: str) -> int:
                 days_ahead = 0  # Today is last Thursday
             else:
                 days_ahead = 7  # Not last Thursday, but still use weekly
+    elif symbol == "NIFTY":
+        # Tuesday expiry (Post SEBI 2025 rules)
+        days_ahead = (1 - weekday) % 7
+    elif symbol in ("BANKNIFTY", "FINNIFTY"):
+        # Monthly only — nearest Thursday
+        days_ahead = (3 - weekday) % 7
     else:
-        # Weekly Thursday expiry (NIFTY, BANKNIFTY, FINNIFTY)
+        # Default Thursday
         days_ahead = (3 - weekday) % 7
 
-    return days_ahead if days_ahead > 0 else 7  # At least 1 week
+    return days_ahead  # 0 = aaj expiry hai
 
 
 def _expiry_boost_factor(days_to_exp: int) -> float:
