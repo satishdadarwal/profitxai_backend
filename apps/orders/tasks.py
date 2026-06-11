@@ -637,34 +637,33 @@ def _notify_position_update(user_id: int, position):
 def save_daily_pnl_snapshot(self, mode="live", market_type="all"):
     from django.contrib.auth import get_user_model
     from django.utils import timezone
-    from apps.orders.models import Trade, Position, DailyPnlSnapshot
+    from apps.orders.models import Order, DailyPnlSnapshot
     User = get_user_model()
     today = timezone.now().date()
     users = User.objects.filter(is_active=True)
     for user in users:
         try:
-            trades_qs = Trade.objects.filter(user=user, created_at__date=today)
+            trades_qs = Order.objects.filter(user=user, created_at__date=today, status=Order.Status.CLOSED)
             if mode != "all":
                 trades_qs = trades_qs.filter(mode=mode)
-            if market_type != "all":
-                trades_qs = trades_qs.filter(market_type=market_type)
             realised = 0.0
             fees = 0.0
             wins = 0
             losses = 0
             for t in trades_qs:
                 pnl = float(t.realized_pnl or 0)
-                fee = float(t.fee or 0)
+                fee = float(t.fee or 0) if hasattr(t, 'fee') else 0.0
                 realised += pnl - fee
                 fees += fee
                 if pnl > 0:
                     wins += 1
                 elif pnl < 0:
                     losses += 1
-            pos_qs = Position.objects.filter(user=user, status="open")
+            # Open orders unrealized pnl
+            open_qs = Order.objects.filter(user=user, status=Order.Status.OPEN)
             if mode != "all":
-                pos_qs = pos_qs.filter(mode=mode)
-            unrealised = sum(float(p.unrealized_pnl or 0) for p in pos_qs)
+                open_qs = open_qs.filter(mode=mode)
+            unrealised = sum(float(o.unrealized_pnl or 0) for o in open_qs if hasattr(o, 'unrealized_pnl'))
             DailyPnlSnapshot.objects.update_or_create(
                 user=user, date=today, mode=mode, market_type=market_type,
                 defaults=dict(

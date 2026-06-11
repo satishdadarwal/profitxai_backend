@@ -928,10 +928,10 @@ class ChartPairView(APIView):
     # ── Paper trade ──────────────────────────────────────────
     def _from_paper_trade(self, user) -> dict | None:
         try:
-            from apps.paper_trading.models import PaperTrade
+            from apps.orders.models import Order
             trade = (
-                PaperTrade.objects
-                .filter(account__user=user, status="open")
+                Order.objects
+                .filter(user=user, mode="paper", status=Order.Status.OPEN)
                 .order_by("-created_at")
                 .first()
             )
@@ -958,11 +958,11 @@ class ChartPairView(APIView):
     # ── Option trade ─────────────────────────────────────────
     def _from_option_trade(self, user) -> dict | None:
         try:
-            from apps.options.models import OptionTrade
+            from apps.orders.models import Order
             trade = (
-                OptionTrade.objects
-                .select_related("symbol", "contract")
-                .filter(user=user, status="open")
+                Order.objects
+                
+                .filter(user=user, mode="live", status=Order.Status.OPEN)
                 .order_by("-created_at")
                 .first()
             )
