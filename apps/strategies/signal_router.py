@@ -402,6 +402,10 @@ def _route_global_strategy(strategy, signal):
         "Global strategy done | strategy=%s | orders_placed=%d / %d users",
         strategy.id, len(placed_orders), len(user_best_account),
     )
+
+    # ── LiveSignal save karo (Screener tab ke liye) ───────────────
+    _save_live_signal_for_strategy(strategy, signal, list(user_best_account.keys()))
+
     return placed_orders[0] if placed_orders else None
 
 
@@ -2522,3 +2526,274 @@ def _ws_notify_failure(user, strategy_name: str, reason: str):
 
     except Exception as e:
         logger.warning("WS failure notification failed: %s", e)
+
+# ── LiveSignal save for Screener tab ─────────────────────────────
+_ALGO_TO_SIGNAL_TYPE = {
+    "ict_silver_bullet":      "SILVER_BULLET",
+    "vix_greeks_expiry_buyer": "VIX_GREEKS",
+    "ict_mtf":                "ICT",
+    "confluence_options":     "SCALPING",
+    "ema_crossover":          "EMA",
+    "ema_scalp":              "EMA",
+    "multi_confirm_crypto":   "MULTI_CONFIRM",
+    "multi_confirm_options":  "MULTI_CONFIRM",
+    "nse_option_seller":      "NSE_SELLER",
+}
+
+def _save_live_signal_for_strategy(strategy, signal, user_ids: list):
+    """
+    Har strategy signal ko LiveSignal mein save karo
+    taaki Screener tab mein chip-wise filter ho sake.
+    """
+    try:
+        from apps.live_trading.models import LiveSignal, TradingSession
+        from apps.strategies.models import UserStrategyPreference
+        from django.contrib.auth import get_user_model
+        from decimal import Decimal
+        import datetime
+
+        User = get_user_model()
+        algo = getattr(strategy, 'algo_name', '') or ''
+        signal_type = _ALGO_TO_SIGNAL_TYPE.get(algo, algo.upper()[:32] or 'STRATEGY')
+
+        sig_type_raw = getattr(signal, 'signal_type', 'buy')
+        direction = 'long' if sig_type_raw in ('buy', 'long', 'bullish') else 'short'
+
+        meta = getattr(signal, 'meta', {}) or {}
+        entry  = float(getattr(signal, 'price', 0) or meta.get('entry_price', 0))
+        sl     = float(meta.get('stop_loss', 0) or meta.get('sl_price', 0))
+        tp     = float(meta.get('take_profit', 0) or meta.get('tp_price', 0))
+        conf   = int(meta.get('confluence', meta.get('score', 60)))
+        rr     = round((tp - entry) / (entry - sl), 2) if sl and tp and entry and (entry - sl) != 0 else 2.0
+
+        for uid in user_ids:
+            try:
+                user = User.objects.get(pk=uid)
+                try:
+                    pref = UserStrategyPreference.objects.get(user=user, strategy_id=getattr(strategy, '_real', strategy).id)
+                    mode = pref.preferred_mode
+                except Exception:
+                    mode = 'paper'
+
+                session, _ = TradingSession.objects.get_or_create(
+                    user=user, is_active=True,
+                    defaults={"mode": mode},
+                )
+
+                LiveSignal.objects.get_or_create(
+                    user=user,
+                    symbol=getattr(strategy, 'symbol', '') or '',
+                    direction=direction,
+                    entry_price=Decimal(str(entry)),
+                    status='pending',
+                    signal_type=signal_type,
+                    defaults=dict(
+                        session=session,
+                        strength=min(100, conf),
+                        stop_loss=Decimal(str(sl)),
+                        take_profit=Decimal(str(tp)),
+                        rr_ratio=Decimal(str(abs(rr))),
+                        lots=Decimal('1'),
+                        mode=mode,
+                        raw_payload={
+                            'grade': 'A',
+                            'grade_emoji': '🟡',
+                            'setup': signal_type,
+                            'strategy': strategy.name,
+                            'algo': algo,
+                            'confluence': conf,
+                            'tags': [algo],
+                            'market_type': 'indian',
+                        },
+                        expires_at=__import__('django.utils.timezone', fromlist=['timezone']).timezone.now()
+                            + datetime.timedelta(hours=1),
+                    ),
+                )
+                logger.info("LiveSignal saved | user=%s | type=%s | symbol=%s", uid, signal_type, strategy.symbol)
+            except Exception as ue:
+                logger.error("LiveSignal save failed | user=%s | %s", uid, ue)
+    except Exception as e:
+        logger.error("_save_live_signal_for_strategy error: %s", e, exc_info=True)
+
+
+# ── LiveSignal save for Screener tab ─────────────────────────────
+_ALGO_TO_SIGNAL_TYPE = {
+    "ict_silver_bullet":       "SILVER_BULLET",
+    "vix_greeks_expiry_buyer": "VIX_GREEKS",
+    "ict_mtf":                 "ICT",
+    "confluence_options":      "SCALPING",
+    "ema_crossover":           "EMA",
+    "ema_scalp":               "EMA",
+    "multi_confirm_crypto":    "MULTI_CONFIRM",
+    "multi_confirm_options":   "MULTI_CONFIRM",
+    "nse_option_seller":       "NSE_SELLER",
+}
+
+def _save_live_signal_for_strategy(strategy, signal, user_ids: list):
+    """
+    Har strategy signal ko LiveSignal mein save karo
+    taaki Screener tab mein chip-wise filter ho sake.
+    """
+    try:
+        from apps.live_trading.models import LiveSignal, TradingSession
+        from apps.strategies.models import UserStrategyPreference
+        from django.contrib.auth import get_user_model
+        from django.utils import timezone
+        from decimal import Decimal
+        import datetime
+
+        User = get_user_model()
+        algo = getattr(strategy, 'algo_name', '') or ''
+        signal_type = _ALGO_TO_SIGNAL_TYPE.get(algo, algo.upper()[:32] or 'STRATEGY')
+
+        sig_type_raw = getattr(signal, 'signal_type', 'buy')
+        direction = 'long' if sig_type_raw in ('buy', 'long', 'bullish') else 'short'
+
+        meta = getattr(signal, 'meta', {}) or {}
+        entry = float(getattr(signal, 'price', 0) or meta.get('entry_price', 0))
+        sl    = float(meta.get('stop_loss', 0) or meta.get('sl_price', 0))
+        tp    = float(meta.get('take_profit', 0) or meta.get('tp_price', 0))
+        conf  = int(meta.get('confluence', meta.get('score', 60)))
+        rr    = round((tp - entry) / (entry - sl), 2) if sl and tp and entry and (entry - sl) != 0 else 2.0
+
+        for uid in user_ids:
+            try:
+                user = User.objects.get(pk=uid)
+                try:
+                    pref = UserStrategyPreference.objects.get(
+                        user=user,
+                        strategy_id=getattr(strategy, '_real', strategy).id,
+                    )
+                    mode = pref.preferred_mode
+                except Exception:
+                    mode = 'paper'
+
+                session, _ = TradingSession.objects.get_or_create(
+                    user=user, is_active=True,
+                    defaults={"mode": mode},
+                )
+
+                LiveSignal.objects.get_or_create(
+                    user=user,
+                    symbol=getattr(strategy, 'symbol', '') or '',
+                    direction=direction,
+                    entry_price=Decimal(str(entry)),
+                    status='pending',
+                    signal_type=signal_type,
+                    defaults=dict(
+                        session=session,
+                        strength=min(100, conf),
+                        stop_loss=Decimal(str(sl)),
+                        take_profit=Decimal(str(tp)),
+                        rr_ratio=Decimal(str(abs(rr))),
+                        lots=Decimal('1'),
+                        mode=mode,
+                        raw_payload={
+                            'grade': 'A',
+                            'grade_emoji': '🟡',
+                            'setup': signal_type,
+                            'strategy': strategy.name,
+                            'algo': algo,
+                            'confluence': conf,
+                            'tags': [algo],
+                            'market_type': 'indian',
+                        },
+                        expires_at=timezone.now() + datetime.timedelta(hours=1),
+                    ),
+                )
+                logger.info(
+                    "LiveSignal saved | user=%s | type=%s | symbol=%s",
+                    uid, signal_type, getattr(strategy, 'symbol', ''),
+                )
+            except Exception as ue:
+                logger.error("LiveSignal save failed | user=%s | %s", uid, ue)
+    except Exception as e:
+        logger.error("_save_live_signal_for_strategy error: %s", e, exc_info=True)
+
+
+# ── LiveSignal save for Screener tab ─────────────────────────────
+_ALGO_TO_SIGNAL_TYPE = {
+    "ict_silver_bullet":       "SILVER_BULLET",
+    "vix_greeks_expiry_buyer": "VIX_GREEKS",
+    "ict_mtf":                 "ICT",
+    "confluence_options":      "SCALPING",
+    "ema_crossover":           "EMA",
+    "ema_scalp":               "EMA",
+    "multi_confirm_crypto":    "MULTI_CONFIRM",
+    "multi_confirm_options":   "MULTI_CONFIRM",
+    "nse_option_seller":       "NSE_SELLER",
+}
+
+def _save_live_signal_for_strategy(strategy, signal, user_ids: list):
+    try:
+        from apps.live_trading.models import LiveSignal, TradingSession
+        from apps.strategies.models import UserStrategyPreference
+        from django.contrib.auth import get_user_model
+        from django.utils import timezone
+        from decimal import Decimal
+        import datetime
+
+        User = get_user_model()
+        algo = getattr(strategy, "algo_name", "") or ""
+        signal_type = _ALGO_TO_SIGNAL_TYPE.get(algo, algo.upper()[:32] or "STRATEGY")
+
+        sig_type_raw = getattr(signal, "signal_type", "buy")
+        direction = "long" if sig_type_raw in ("buy", "long", "bullish") else "short"
+
+        meta = getattr(signal, "meta", {}) or {}
+        entry = float(getattr(signal, "price", 0) or meta.get("entry_price", 0))
+        sl    = float(meta.get("stop_loss", 0) or meta.get("sl_price", 0))
+        tp    = float(meta.get("take_profit", 0) or meta.get("tp_price", 0))
+        conf  = int(meta.get("confluence", meta.get("score", 60)))
+        rr    = round((tp - entry) / (entry - sl), 2) if sl and tp and entry and (entry - sl) != 0 else 2.0
+
+        for uid in user_ids:
+            try:
+                user = User.objects.get(pk=uid)
+                try:
+                    pref = UserStrategyPreference.objects.get(
+                        user=user,
+                        strategy_id=getattr(strategy, "_real", strategy).id,
+                    )
+                    mode = pref.preferred_mode
+                except Exception:
+                    mode = "paper"
+
+                session, _ = TradingSession.objects.get_or_create(
+                    user=user, is_active=True,
+                    defaults={"mode": mode},
+                )
+
+                LiveSignal.objects.get_or_create(
+                    user=user,
+                    symbol=getattr(strategy, "symbol", "") or "",
+                    direction=direction,
+                    entry_price=Decimal(str(entry)),
+                    status="pending",
+                    signal_type=signal_type,
+                    defaults=dict(
+                        session=session,
+                        strength=min(100, conf),
+                        stop_loss=Decimal(str(sl)),
+                        take_profit=Decimal(str(tp)),
+                        rr_ratio=Decimal(str(abs(rr))),
+                        lots=Decimal("1"),
+                        mode=mode,
+                        raw_payload={
+                            "grade": "A",
+                            "grade_emoji": "🟡",
+                            "setup": signal_type,
+                            "strategy": strategy.name,
+                            "algo": algo,
+                            "confluence": conf,
+                            "tags": [algo],
+                            "market_type": "indian",
+                        },
+                        expires_at=timezone.now() + datetime.timedelta(hours=1),
+                    ),
+                )
+                logger.info("LiveSignal saved | user=%s | type=%s | symbol=%s", uid, signal_type, getattr(strategy, "symbol", ""))
+            except Exception as ue:
+                logger.error("LiveSignal save failed | user=%s | %s", uid, ue)
+    except Exception as e:
+        logger.error("_save_live_signal_for_strategy error: %s", e, exc_info=True)

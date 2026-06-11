@@ -846,15 +846,20 @@ class DailyPnlView(APIView):
             user=request.user, date=target_date, mode=mode
         ).first()
 
-        if snap:
+        snap_realized = float(getattr(snap, 'realized_pnl', 0) or getattr(snap, 'realised_pnl', 0) or 0) if snap else 0
+        snap_trades = (getattr(snap, 'trade_count', 0) or getattr(snap, 'total_trades', 0) or 0) if snap else 0
+        if snap and snap_trades > 0 and snap_realized != 0:
             return Response({
                 'date': str(snap.date),
                 'mode': snap.mode,
-                'realised': float(getattr(snap, 'realized_pnl', 0) or getattr(snap, 'realised_pnl', 0) or 0),
-                'unrealised': float(getattr(snap, 'unrealized_pnl', 0) or getattr(snap, 'unrealised_pnl', 0) or 0),
-                'total': float(getattr(snap, 'realised_pnl', 0) or 0) + float(getattr(snap, 'unrealised_pnl', 0) or 0),
-                'total_trades': getattr(snap, 'trade_count', 0) or getattr(snap, 'total_trades', 0) or 0,
-                'wins': getattr(snap, 'win_count', 0) or getattr(snap, 'wins', 0) or 0,
+                'realised': snap_realized,
+                'unrealised': float(getattr(snap, 'unrealized_pnl', 0) or getattr(snap, 'unrealised_pnl', 0) or 0) if snap else 0,
+                'total': snap_realized,
+                'total_trades': snap_trades,
+                'wins': (getattr(snap, 'win_count', 0) or getattr(snap, 'wins', 0) or 0) if snap else 0,
+                'realized_pnl': snap_realized,
+                'unrealized_pnl': 0.0,
+                'total_pnl': snap_realized,
                 'source': 'snapshot',
             })
 
