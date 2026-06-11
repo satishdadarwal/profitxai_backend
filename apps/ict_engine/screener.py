@@ -633,7 +633,7 @@ class ICTScreener:
         from .runner import DataProvider
 
         # Indian symbols
-        indian_symbols = (symbols or self.SYMBOLS) if market_open else []
+        indian_symbols = symbols or self.SYMBOLS
         fyers_provider = FyersDataProvider(user=user, days_back=60)
 
         # Crypto symbols (market time check bypass — 24x7)
