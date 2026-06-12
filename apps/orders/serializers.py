@@ -17,8 +17,17 @@ def _order_market_type(obj: Order) -> str:
 
 
 class OrderSerializer(serializers.ModelSerializer):
-    symbol = serializers.CharField(source='asset.symbol', read_only=True)
+    symbol = serializers.SerializerMethodField()
     asset_name = serializers.CharField(source='asset.name', read_only=True)
+    # Flutter reads stop_loss or sl; expose sl_price under both names
+    stop_loss = serializers.DecimalField(source='sl_price', max_digits=20, decimal_places=6, read_only=True)
+
+    def get_symbol(self, obj):
+        if obj.symbol_display:
+            return obj.symbol_display
+        if obj.asset:
+            return obj.asset.symbol
+        return obj.symbol or ''
 
     class Meta:
         model = Order
@@ -26,12 +35,12 @@ class OrderSerializer(serializers.ModelSerializer):
             'id', 'user', 'asset', 'symbol', 'asset_name', 'strategy',
             'broker_account', 'side', 'order_type', 'status', 'mode',
             'quantity', 'filled_qty', 'remaining_qty', 'limit_price',
-            'stop_price', 'avg_fill_price', 'sl_price', 'target_price',
+            'stop_price', 'stop_loss', 'avg_fill_price', 'sl_price', 'target_price',
             'exchange_order_id', 'execution_status', 'broker_response',
             'rejection_reason', 'notes',
             'entry_price', 'exit_price', 'realized_pnl', 'unrealized_pnl',
             'current_price', 'entry_time', 'exit_time', 'exit_reason',
-            'position_size',
+            'position_size', 'symbol_display',
             'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'user', 'created_at', 'updated_at', 'remaining_qty']

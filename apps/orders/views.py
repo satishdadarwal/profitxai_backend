@@ -25,11 +25,18 @@ from .serializers import (
 class OrderViewSet(viewsets.ModelViewSet):
     serializer_class = OrderSerializer
     permission_classes = [IsAuthenticated]
-    
+
     def get_queryset(self):
-        return Order.objects.filter(user=self.request.user).select_related(
+        qs = Order.objects.filter(user=self.request.user).select_related(
             'asset', 'strategy', 'broker_account'
         )
+        mode = self.request.query_params.get('mode')
+        if mode:
+            qs = qs.filter(mode=mode)
+        status_param = self.request.query_params.get('status')
+        if status_param:
+            qs = qs.filter(status=status_param)
+        return qs
     
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)
