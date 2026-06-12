@@ -636,7 +636,7 @@ class TradeJournalListView(APIView):
         # Order model — single source of truth for paper and live
         order_qs = Order.objects.filter(
             user=request.user,
-        ).exclude(side=None).select_related("asset").order_by("-created_at")
+        ).exclude(side=None).exclude(status="rejected").select_related("asset").order_by("-created_at")
         if mode_filter != "all":
             order_qs = order_qs.filter(mode=mode_filter)
         if market_type == "indian":
@@ -690,7 +690,7 @@ class TradeJournalListView(APIView):
         from collections import defaultdict
         buys = defaultdict(list)
         for r in results:
-            if r.get("side") == "buy":
+            if r.get("side") == "buy" and r.get("price", 0) > 0:
                 buys[r["symbol"]].append(r)
         for r in results:
             if r.get("side") == "sell":
