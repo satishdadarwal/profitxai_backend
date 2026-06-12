@@ -127,6 +127,22 @@ STRATEGY_TEMPLATES["hourly_macro_scalp_options"] = {
 }
 
 
+STRATEGY_TEMPLATES["one_setup_life"] = {
+    "instrument_type": "options",
+    "risk_config": {
+        "trader_type": "buyer",
+        "qty": 1,
+    },
+    "parameters": {
+        "min_rr": 2.0,
+        "min_score": 50.0,
+        "killzone_filter": True,
+    },
+    "allowed_plans": ["elite"],
+    "is_global": True,
+}
+
+
 def apply_template(strategy):
     """Strategy save hone pe template se missing fields fill karo."""
     template = STRATEGY_TEMPLATES.get(strategy.algo_name)
