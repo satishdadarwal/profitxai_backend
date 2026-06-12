@@ -134,9 +134,14 @@ STRATEGY_TEMPLATES["one_setup_life"] = {
         "qty": 1,
     },
     "parameters": {
+        # Backtest (15 NSE days / 8 crypto days, Jun 2026):
+        #   FVG/OB filter is the real bottleneck — score threshold doesn't
+        #   change signal frequency, only the zone detection does.
+        #   Options: kz=False recovers SENSEX setups outside strict killzones.
+        #   Crypto: loose (40/1.5) because only 1-2 setups/week are seen.
         "min_rr": 2.0,
-        "min_score": 50.0,
-        "killzone_filter": True,
+        "min_score": 50,
+        "killzone_filter": False,
     },
     "allowed_plans": ["elite"],
     "is_global": True,
