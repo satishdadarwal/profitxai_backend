@@ -667,6 +667,22 @@ class SymbolListView(View):
 # ─────────────────────────────────────────────────────────────────
 import json as _json
 
+# Module-level singleton — ek hi ConnectionPool, har request pe naya pool nahi
+# banta. File-descriptor leak aur Redis max-client exhaustion se bachata hai.
+_ticker_redis: "redis.Redis | None" = None
+
+
+def _get_ticker_redis() -> "redis.Redis":
+    global _ticker_redis
+    if _ticker_redis is None:
+        _ticker_redis = redis.Redis.from_url(
+            settings.REDIS_URL,
+            decode_responses=True,
+            socket_connect_timeout=2,
+            socket_timeout=2,
+        )
+    return _ticker_redis
+
 _TICKER_SYMBOLS = [
     "NSE:NIFTY50-INDEX",
     "NSE:NIFTYBANK-INDEX",
@@ -736,12 +752,7 @@ def public_ticker(request):
     """
     result = []
     try:
-        r = redis.Redis.from_url(
-            settings.REDIS_URL,
-            decode_responses=True,
-            socket_connect_timeout=2,
-            socket_timeout=2,
-        )
+        r = _get_ticker_redis()
         raw_values = r.hmget("tick_snapshot", _TICKER_SYMBOLS)
         for symbol, raw in zip(_TICKER_SYMBOLS, raw_values):
             if raw:
