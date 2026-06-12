@@ -1100,7 +1100,8 @@ def execute_silver_bullet_cycle(strategy, symbol: str) -> dict:
         return _null_sb_signal(symbol)
 
     if sig is None:
-        return _null_sb_signal(symbol)
+        if getattr(strategy, "algo_name", "") != "confluence_options":
+            return _null_sb_signal(symbol)
 
     # Duplicate check — Order model se check karo (symbol + user)
     try:
@@ -1134,16 +1135,22 @@ def execute_silver_bullet_cycle(strategy, symbol: str) -> dict:
                 {"high": float(r.high), "low": float(r.low), "close": float(r.close)}
                 for _, r in df_5m.iterrows()
             ] if not df_5m.empty else []
-            sb_dict = {"direction": sig.direction.value, "confluence_score": sig.confluence_score, "score": sig.confluence_score}
+            if sig is not None:
+                sb_dict = {"direction": sig.direction.value, "confluence_score": sig.confluence_score, "score": sig.confluence_score}
+            else:
+                sb_dict = {"direction": None, "confluence_score": 0, "score": 0}
             algo = ConfluenceOptionsAlgo(parameters=getattr(strategy, "parameters", {}), risk_config=getattr(strategy, "risk_config", {}))
             conf_signal = algo.generate_signal(symbol=symbol, candles_5m=df5_list, candles_15m=[], candles_1h=[], sb_signal=sb_dict)
             if conf_signal:
                 logger.info("✅ Confluence signal | %s | %s | combined=%.1f", symbol, conf_signal["option_type"], conf_signal["confidence"])
-                sig_meta = sig.to_dict()
+                sig_meta = sig.to_dict() if sig is not None else {}
                 sig_meta.update(conf_signal)
                 return {"signal_type": conf_signal["signal_type"], "symbol": symbol, "price": Decimal(str(conf_signal["price"])), "reason": f'Confluence {conf_signal["option_type"]} | SB={conf_signal["sb_score"]} MC={conf_signal["mc_score"]}', "metadata": sig_meta, "result": "executed", "order": None}
             else:
-                logger.info("Confluence: SB ok but MC failed | %s", symbol)
+                if sig is not None:
+                    logger.info("Confluence: SB ok but MC failed | %s", symbol)
+                else:
+                    logger.debug("Confluence: no SB + MC criteria not met | %s", symbol)
                 return _null_sb_signal(symbol)
     except Exception as _ce:
         logger.warning("Confluence check error | %s", _ce)
