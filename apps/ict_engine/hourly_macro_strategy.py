@@ -19,8 +19,11 @@ Concept (inspired by ICT "Hourly Macro" / Mini_ORB wick-zone scalping):
    TP (reversal): opposite zone edge / midline.
    TP (continuation): risk * min_rr.
 
-Symbols (phase 1): BTCUSD, ETHUSD (Delta Exchange perps).
-Options (NIFTY/BANKNIFTY/SENSEX) support planned for a follow-up session.
+Symbols: BTCUSD, ETHUSD (Delta Exchange perps) AND NIFTY/BANKNIFTY/SENSEX
+(NSE options buyer). Auto-detected from symbol name; the zone/reversal/
+continuation/scoring logic is instrument-agnostic. For options, direction
+is encoded as CE/PE (both are "buy" orders); Greeks gate (delta 0.25-0.65,
+theta > -15) is applied before emitting a signal.
 """
 from __future__ import annotations
 
@@ -38,7 +41,9 @@ from .ict import (
     detect_bos_choch,
     swing_indices,
 )
-from apps.backtest.algos.confluence_options import _atr
+from apps.backtest.algos.confluence_options import _atr, _strike_price, _dte
+
+_OPTIONS_SYMBOLS = frozenset({"NIFTY", "BANKNIFTY", "SENSEX"})
 
 logger = logging.getLogger(__name__)
 
@@ -379,6 +384,72 @@ def _null_macro_signal(symbol: str) -> dict:
     }
 
 
+def _execute_hourly_macro_options(strategy, symbol: str, sig: HourlyMacroSignal) -> dict:
+    """Options execution wrapper for HourlyMacro signals (NIFTY/BANKNIFTY/SENSEX)."""
+    try:
+        from apps.orders.models import Order as _Order
+        from django.db.models import Q
+        _user = getattr(strategy, "user", None)
+        _qs = _Order.objects.filter(
+            Q(symbol_display__icontains=symbol) | Q(asset__symbol__icontains=symbol),
+            status__in=["open", "pending"],
+        )
+        if _user:
+            _qs = _qs.filter(user=_user)
+        if _qs.exists():
+            logger.info("[HourlyMacro] Duplicate skip: open position exists for %s", symbol)
+            return _null_macro_signal(symbol)
+    except Exception as e:
+        logger.warning("[HourlyMacro] Duplicate check failed | %s", e)
+
+    option_type = "CE" if sig.direction == MacroDirection.LONG else "PE"
+    spot = sig.entry_price
+    strike = _strike_price(spot, symbol, option_type, otm_shift=0)
+    dte = _dte(symbol)
+
+    try:
+        from apps.options.black_scholes import compute_greeks
+        T = max(dte / 365, 0.001)
+        bs_type = "call" if option_type == "CE" else "put"
+        g = compute_greeks(spot, strike, T, 0.065, 0.15, bs_type)
+        delta = abs(g["delta"])
+        theta = g["theta"]
+        if not (0.25 <= delta <= 0.65):
+            logger.debug("[HourlyMacro] %s delta=%.3f out of range | %s", option_type, delta, symbol)
+            return _null_macro_signal(symbol)
+        if theta < -15:
+            logger.debug("[HourlyMacro] %s theta=%.2f too high decay | %s", option_type, theta, symbol)
+            return _null_macro_signal(symbol)
+    except Exception:
+        pass
+
+    logger.info(
+        "✅ HourlyMacro Options signal | %s | %s | dir=%s | setup=%s | entry=%.2f | "
+        "SL=%.2f | TP=%.2f | RR=%.2f | score=%.1f | strike=%d | DTE=%d",
+        symbol, option_type, sig.direction.value, sig.setup_type.value,
+        sig.entry_price, sig.stop_loss, sig.take_profit, sig.rr_ratio,
+        sig.confluence_score, strike, dte,
+    )
+
+    sig_meta = sig.to_dict()
+    sig_meta.update({
+        "option_type": option_type,
+        "strike": strike,
+        "dte": dte,
+        "setup_type": f"HourlyMacro_{sig.setup_type.value}_{option_type}_{symbol}",
+    })
+
+    return {
+        "signal_type": "buy",
+        "symbol": symbol,
+        "price": Decimal(str(spot)),
+        "reason": f"HourlyMacro {sig.setup_type.value} {option_type} | {sig.notes}",
+        "metadata": sig_meta,
+        "result": "executed",
+        "order": None,
+    }
+
+
 def execute_hourly_macro_cycle(strategy, symbol: str) -> dict:
     """
     Live/paper cycle entrypoint for the Hourly Macro Scalp strategy.
@@ -455,6 +526,10 @@ def execute_hourly_macro_cycle(strategy, symbol: str) -> dict:
     if sig is None:
         return _null_macro_signal(symbol)
 
+    if symbol.upper() in _OPTIONS_SYMBOLS:
+        return _execute_hourly_macro_options(strategy, symbol, sig)
+
+    # --- Crypto perp path (BTCUSD / ETHUSD) ---
     try:
         from apps.orders.models import Order as _Order
         from django.db.models import Q

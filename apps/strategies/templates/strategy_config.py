@@ -107,6 +107,24 @@ STRATEGY_TEMPLATES["hourly_macro_scalp"] = {
     "allowed_plans": ["elite"],
     "is_global": True,
 }
+# Options variant: same algo_name="hourly_macro_scalp", set instrument_type="options"
+# and symbols=["NIFTY","BANKNIFTY","SENSEX"] on the Strategy DB record directly.
+# apply_template() will not overwrite instrument_type when it is already set.
+STRATEGY_TEMPLATES["hourly_macro_scalp_options"] = {
+    "instrument_type": "options",
+    "risk_config": {
+        "trader_type": "buyer",
+        "qty": 1,
+    },
+    "parameters": {
+        "min_rr": 2.0,
+        "atr_sl_mult": 0.5,
+        "min_score": 50.0,
+        "zone_buffer_atr_mult": 0.25,
+    },
+    "allowed_plans": ["elite"],
+    "is_global": True,
+}
 
 
 def apply_template(strategy):
