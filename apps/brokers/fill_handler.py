@@ -398,41 +398,25 @@ def process_broker_fill(
                     broker_order.avg_fill_price = fill_price
                     broker_order.save(update_fields=["realized_pnl", "avg_fill_price"])
 
-                # ── Order model pe realized_pnl sync karo ──
+                # ── Order entry/exit sync karo ──
                 try:
                     from apps.orders.models import Order
-                    linked_order = Order.objects.filter(
-                        exchange_order_id=broker_order.exchange_order_id
-                    ).first()
+                    linked_order = order
                     if linked_order and fill_price and fill_qty:
-                        from decimal import Decimal
                         fill_dec = Decimal(str(fill_price))
-                        qty_dec  = Decimal(str(fill_qty))
-
-                        # Buy fill → entry_price set karo
-                        if linked_order.side == 'buy' and not linked_order.entry_price:
+                        if linked_order.side == 'buy':
                             linked_order.entry_price = fill_dec
-                            linked_order.status = 'open'
-                            linked_order.save(update_fields=['entry_price', 'status', 'updated_at'])
-                            logger.info("Order entry_price set | order=%s | price=%s", linked_order.id, fill_dec)
-
-                        # Sell fill → exit + pnl calculate karo
+                            linked_order.entry_time  = timezone.now()
+                            linked_order.save(update_fields=['entry_price', 'entry_time', 'updated_at'])
+                            logger.info("✅ entry_price set | order=%s | price=%s", linked_order.id, fill_dec)
                         elif linked_order.side == 'sell':
-                            entry = float(linked_order.entry_price or linked_order.avg_fill_price or 0)
-                            exit_p = float(fill_price)
-                            qty = float(fill_qty)
-                            if entry > 0 and exit_p > 0 and qty > 0:
-                                pnl = Decimal(str(round((exit_p - entry) * qty, 2)))
-                                linked_order.realized_pnl = pnl
-                                linked_order.status = 'closed'
-                                linked_order.exit_price = fill_dec
-                                linked_order.save(update_fields=[
-                                    'realized_pnl', 'status', 'exit_price', 'updated_at'
-                                ])
-                            logger.info("Order pnl synced | order=%s | pnl=%s",
-                                        linked_order.id, pnl)
+                            linked_order.exit_price = fill_dec
+                            linked_order.exit_time  = timezone.now()
+                            linked_order.status     = Order.Status.FILLED
+                            linked_order.save(update_fields=['exit_price', 'exit_time', 'status', 'updated_at'])
+                            logger.info("✅ exit_price set | order=%s | price=%s", linked_order.id, fill_dec)
                 except Exception as e:
-                    logger.error("Order pnl sync error | %s", e)
+                    logger.error("Order entry/exit sync error | %s", e, exc_info=True)
 
             except InvalidOrderError as e:
                 logger.error(

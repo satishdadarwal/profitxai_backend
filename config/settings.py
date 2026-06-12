@@ -197,7 +197,8 @@ CELERY_TASK_TRACK_STARTED = True
 CELERY_TASK_TIME_LIMIT = 300  # 5 minutes hard limit
 CELERY_TASK_SOFT_TIME_LIMIT = 240  # 4 minutes soft limit
 CELERY_WORKER_PREFETCH_MULTIPLIER = 1  # fair queue for long tasks
-CELERY_RESULT_EXPIRES = timedelta(days=1)
+CELERY_RESULT_EXPIRES = timedelta(hours=1)
+CELERY_IGNORE_RESULT = True
 CELERY_WORKER_CONCURRENCY = 20   # 20 parallel workers
 CELERY_WORKER_PREFETCH_MULTIPLIER = 1  # fair distribution
 CELERY_TASK_ACKS_LATE = True     # reliability: task ack only after completion

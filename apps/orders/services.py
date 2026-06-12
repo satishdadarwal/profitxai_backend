@@ -353,6 +353,8 @@ def fill_order(
     with db_transaction.atomic():
         order.filled_qty += fill_qty
         order.avg_fill_price = _weighted_avg_price(order, fill_price, fill_qty)
+        if order.side == Order.Side.BUY and not order.entry_price:
+            order.entry_price = fill_price
         if realized_pnl is not None:
             order.realized_pnl = realized_pnl
 
@@ -362,7 +364,7 @@ def fill_order(
             order.status = Order.Status.PARTIAL
 
         order.save(
-            update_fields=["filled_qty", "avg_fill_price", "status", "realized_pnl", "updated_at"]
+            update_fields=["filled_qty", "avg_fill_price", "entry_price", "status", "realized_pnl", "updated_at"]
         )
 
         if order.mode == Order.Mode.LIVE:
