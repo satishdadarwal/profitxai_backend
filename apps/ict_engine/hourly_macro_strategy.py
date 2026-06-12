@@ -407,28 +407,50 @@ def _execute_hourly_macro_options(strategy, symbol: str, sig: HourlyMacroSignal)
     strike = _strike_price(spot, symbol, option_type, otm_shift=0)
     dte = _dte(symbol)
 
+    option_premium = None
+    abs_delta = None
     try:
         from apps.options.black_scholes import compute_greeks
         T = max(dte / 365, 0.001)
         bs_type = "call" if option_type == "CE" else "put"
         g = compute_greeks(spot, strike, T, 0.065, 0.15, bs_type)
-        delta = abs(g["delta"])
+        abs_delta = abs(g["delta"])
         theta = g["theta"]
-        if not (0.25 <= delta <= 0.65):
-            logger.debug("[HourlyMacro] %s delta=%.3f out of range | %s", option_type, delta, symbol)
+        if not (0.25 <= abs_delta <= 0.65):
+            logger.debug("[HourlyMacro] %s delta=%.3f out of range | %s", option_type, abs_delta, symbol)
             return _null_macro_signal(symbol)
         if theta < -15:
             logger.debug("[HourlyMacro] %s theta=%.2f too high decay | %s", option_type, theta, symbol)
             return _null_macro_signal(symbol)
+        option_premium = round(g["price"], 2)
     except Exception:
         pass
 
+    # Convert spot-based SL/TP to option premium levels using delta approximation.
+    # For a buyer: premium moves abs_delta * spot_points in the favourable direction.
+    if option_premium and abs_delta:
+        if option_type == "CE":
+            spot_risk   = sig.entry_price - sig.stop_loss    # > 0 (sl below entry)
+            spot_reward = sig.take_profit - sig.entry_price  # > 0 (tp above entry)
+        else:  # PE
+            spot_risk   = sig.stop_loss - sig.entry_price    # > 0 (sl above entry)
+            spot_reward = sig.entry_price - sig.take_profit  # > 0 (tp below entry)
+        premium_sl = round(max(option_premium - abs_delta * spot_risk,  1.0), 2)
+        premium_tp = round(option_premium + abs_delta * spot_reward, 2)
+    else:
+        # fallback: ±30%/+60% of premium (no Greeks available)
+        premium_sl = round(option_premium * 0.70, 2) if option_premium else None
+        premium_tp = round(option_premium * 1.60, 2) if option_premium else None
+
+    entry_price_dec = Decimal(str(option_premium)) if option_premium else Decimal(str(spot))
+
     logger.info(
-        "✅ HourlyMacro Options signal | %s | %s | dir=%s | setup=%s | entry=%.2f | "
-        "SL=%.2f | TP=%.2f | RR=%.2f | score=%.1f | strike=%d | DTE=%d",
+        "✅ HourlyMacro Options signal | %s | %s | dir=%s | setup=%s | spot=%.2f | "
+        "premium=%.2f | SL=%.2f | TP=%.2f | RR=%.2f | score=%.1f | strike=%d | DTE=%d",
         symbol, option_type, sig.direction.value, sig.setup_type.value,
-        sig.entry_price, sig.stop_loss, sig.take_profit, sig.rr_ratio,
-        sig.confluence_score, strike, dte,
+        sig.entry_price, option_premium or 0.0,
+        premium_sl or 0.0, premium_tp or 0.0,
+        sig.rr_ratio, sig.confluence_score, strike, dte,
     )
 
     sig_meta = sig.to_dict()
@@ -436,13 +458,20 @@ def _execute_hourly_macro_options(strategy, symbol: str, sig: HourlyMacroSignal)
         "option_type": option_type,
         "strike": strike,
         "dte": dte,
+        "entry_premium": option_premium,
+        "spot_sl": sig.stop_loss,
+        "spot_tp": sig.take_profit,
+        # Override sig.to_dict()'s spot-based stop_loss/take_profit with premium levels
+        # so _handle_ict_signal -> _place_paper_order_ict uses option-premium SL/TP.
+        "stop_loss":   premium_sl  if premium_sl  else sig.stop_loss,
+        "take_profit": premium_tp  if premium_tp  else sig.take_profit,
         "setup_type": f"HourlyMacro_{sig.setup_type.value}_{option_type}_{symbol}",
     })
 
     return {
         "signal_type": "buy",
         "symbol": symbol,
-        "price": Decimal(str(spot)),
+        "price": entry_price_dec,
         "reason": f"HourlyMacro {sig.setup_type.value} {option_type} | {sig.notes}",
         "metadata": sig_meta,
         "result": "executed",

@@ -215,6 +215,17 @@ def create_order(
         order.option_type = option_type
         update_fields.append("option_type")
 
+    # ── entry_price: use avg_fill_price if positive, else limit_price ────
+    if not order.entry_price:
+        _ep = (
+            order.avg_fill_price
+            if (order.avg_fill_price and order.avg_fill_price > Decimal("0"))
+            else order.limit_price
+        )
+        if _ep:
+            order.entry_price = _ep
+            update_fields.append("entry_price")
+
     # ── Broker execution result (agar caller ne already place kiya ho) ──
     if exchange_order_id:
         order.exchange_order_id = exchange_order_id
