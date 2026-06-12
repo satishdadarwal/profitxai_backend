@@ -210,6 +210,9 @@ class FyersFeedManager:
                     status=Order.Status.OPEN,
                 ).values_list('symbol_display', flat=True).distinct()
                 for sym in open_symbols:
+                    if not sym or not sym.strip():
+                        logger.info("FyersFeed: Pre-load skipping empty symbol_display")
+                        continue
                     # Crypto symbols skip karo — Fyers support nahi karta
                     if "-USDT" in sym.upper() or "-USD" in sym.upper() or "USDT" in sym.upper():
                         logger.info("FyersFeed: Pre-load skipping crypto: %s", sym)
