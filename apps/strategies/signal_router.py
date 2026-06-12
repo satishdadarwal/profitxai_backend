@@ -33,6 +33,7 @@ def route_and_place_order(strategy, signal) -> Optional[object]:
             strategy_id=strategy.id,
             status__in=["open", "pending", "filled"],
             created_at__date=today,
+            mode=strategy.mode,
         ).exists()
         if open_order:
             logger.info(
