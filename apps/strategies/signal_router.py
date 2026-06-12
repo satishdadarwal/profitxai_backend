@@ -2158,7 +2158,7 @@ def _place_paper_trade(strategy, signal):
             strategy, signal, symbol, direction,
             entry_price, sl_price, tp_price, position_size,
         )
-    elif instrument in ["futures", "equity", "crypto"]:
+    elif instrument in ["futures", "equity", "crypto", "perp"]:
         return _paper_generic_trade(
             strategy, symbol, direction,
             entry_price, sl_price, tp_price, position_size,

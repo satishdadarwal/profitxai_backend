@@ -1014,6 +1014,13 @@ def _place_live_order(strategy, signal):
 
 
 def _place_paper_order(strategy, signal):
+    # For options/perp: route through _place_paper_trade which selects the
+    # correct ATM contract or uses signal.price directly via open_trade —
+    # avoids zero-fill from base-symbol (NIFTY/ETHUSD) assets with last_price=0.
+    if getattr(strategy, 'instrument_type', '') in ('options', 'perp'):
+        from .signal_router import _place_paper_trade
+        return _place_paper_trade(strategy, signal)
+
     # ✅ DUPLICATE CHECK
     try:
         from apps.orders.models import Order
@@ -1079,6 +1086,13 @@ def _place_paper_order(strategy, signal):
     )
 
 def _place_paper_order_ict(strategy, signal, sl_price=None, tp_price=None):
+    # For options strategies, route through _place_paper_trade — same fix as
+    # _place_paper_order. ICT options signals carry spot price in signal.price;
+    # _paper_option_trade correctly fetches the ATM option premium.
+    if getattr(strategy, 'instrument_type', '') == 'options':
+        from .signal_router import _place_paper_trade
+        return _place_paper_trade(strategy, signal)
+
     # ✅ DUPLICATE CHECK
     try:
         from apps.orders.models import Order
