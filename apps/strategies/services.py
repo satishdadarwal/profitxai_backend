@@ -1054,6 +1054,7 @@ def _place_paper_order(strategy, signal):
             spot_price, atr_val, option_type, sl_price, tgt_price
         )
     else:
+        option_type = ""
         sl_pct     = float(risk.get("sl_pct", 0.5))
         target_pct = float(risk.get("target_pct", 1.0))
         if signal.signal_type == "buy":
@@ -1068,6 +1069,7 @@ def _place_paper_order(strategy, signal):
         quantity=qty, price=Decimal(str(price)), sl_price=Decimal(str(sl_price)),
         target_price=Decimal(str(tgt_price)),
         instrument_type=instrument_type,
+        option_type=option_type,
         broker=None, mode="paper",
     )
 
@@ -1093,6 +1095,7 @@ def _place_paper_order_ict(strategy, signal, sl_price=None, tp_price=None):
     sl = float(sl_price) if sl_price else _fallback_sl(price, signal.signal_type, strategy)
     tp = float(tp_price) if tp_price else _fallback_tp(price, signal.signal_type, strategy)
     qty = int(meta.get("position_size", 1) or strategy.parameters.get("qty", 1))
+    option_type = meta.get("option_type", "")
 
     logger.info(
         "Paper ICT | %s %s @ %.2f | SL=%.2f TP=%.2f | qty=%d",
@@ -1104,6 +1107,7 @@ def _place_paper_order_ict(strategy, signal, sl_price=None, tp_price=None):
         quantity=qty, price=Decimal(str(price)), sl_price=Decimal(str(sl)),
         target_price=Decimal(str(tp)),
         instrument_type=getattr(strategy, "instrument_type", "equity"),
+        option_type=option_type,
         broker=None, mode="paper",
     )
 

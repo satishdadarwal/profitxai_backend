@@ -151,6 +151,7 @@ def create_order(
     sl_price: Optional[Decimal] = None,
     target_price: Optional[Decimal] = None,
     instrument_type: str = "equity",
+    option_type: str = "",
     broker=None,
     exchange_order_id: str = "",
     broker_response: dict = None,
@@ -207,6 +208,12 @@ def create_order(
     if target_price is not None:
         order.target_price = target_price
         update_fields.append("target_price")
+    if instrument_type:
+        order.instrument_type = instrument_type
+        update_fields.append("instrument_type")
+    if option_type:
+        order.option_type = option_type
+        update_fields.append("option_type")
 
     # ── Broker execution result (agar caller ne already place kiya ho) ──
     if exchange_order_id:
