@@ -680,6 +680,11 @@ def _execute_cycle_inner(strategy, target_symbol: str) -> "AlgoSignal":
         result = execute_orb_gap_cycle(strategy, target_symbol)
         signal = _wrap_ict_result(result, target_symbol)
         return _handle_ict_signal(strategy, signal, target_symbol, strat_key)
+    if strategy.algo_name == "hourly_macro_scalp":
+        from apps.ict_engine.hourly_macro_strategy import execute_hourly_macro_cycle
+        result = execute_hourly_macro_cycle(strategy, target_symbol)
+        signal = _wrap_ict_result(result, target_symbol)
+        return _handle_ict_signal(strategy, signal, target_symbol, strat_key)
 
     if strategy.algo_name == "ema_scalp":
         from apps.ict_engine.ema_scalp import execute_ema_scalp_cycle

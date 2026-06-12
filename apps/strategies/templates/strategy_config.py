@@ -92,6 +92,21 @@ STRATEGY_TEMPLATES["orb_gap_options"] = {
     "allowed_plans": ["elite"],
     "is_global": True,
 }
+STRATEGY_TEMPLATES["hourly_macro_scalp"] = {
+    "instrument_type": "perp",
+    "risk_config": {
+        "trader_type": "scalper",
+        "qty": 1,
+    },
+    "parameters": {
+        "min_rr": 2.0,
+        "atr_sl_mult": 0.5,
+        "min_score": 50.0,
+        "zone_buffer_atr_mult": 0.25,
+    },
+    "allowed_plans": ["elite"],
+    "is_global": True,
+}
 
 
 def apply_template(strategy):
