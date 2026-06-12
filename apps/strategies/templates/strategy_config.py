@@ -77,6 +77,21 @@ STRATEGY_TEMPLATES["confluence_options"] = {
     "allowed_plans": ["elite"],
     "is_global": True,
 }
+STRATEGY_TEMPLATES["orb_gap_options"] = {
+    "instrument_type": "options",
+    "risk_config": {
+        "trader_type": "buyer",
+        "qty": 1,
+        "max_pyramid_lots": 2,
+    },
+    "parameters": {
+        "capital": 15000,
+        "min_rr": 3.0,
+        "atr_sl_mult": 1.0,
+    },
+    "allowed_plans": ["elite"],
+    "is_global": True,
+}
 
 
 def apply_template(strategy):
