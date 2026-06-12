@@ -30,7 +30,12 @@ STRATEGY_TEMPLATES = {
     "ict_silver_bullet": {
         "instrument_type": "options",
         "risk_config": {"trader_type": "buyer", "qty": 1, "atr_sl_mult": 1.0, "atr_tp_mult": 3.0},
-        "parameters": {"capital": 100000, "min_rr": 3.0},
+        "parameters": {
+            "capital": 100000,
+            "min_rr": 3.0,
+            "enable_pd_zone_reanchor": True,
+            "max_sweep_age_bars": 30,
+        },
         "allowed_plans": ["elite", "pro"],
         "is_global": True,
     },
