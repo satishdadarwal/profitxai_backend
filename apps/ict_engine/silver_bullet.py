@@ -136,6 +136,7 @@ class SilverBullet2MStrategy:
         sweep_lookback_bars: int = 100,
         mss_lookback_bars: int = 20,
         sl_buffer_points: float = 5.0,
+        enable_pd_zone_reanchor: bool = True,
     ):
         self.account_balance = account_balance
         self.risk_per_trade_pct = risk_per_trade_pct
@@ -143,6 +144,7 @@ class SilverBullet2MStrategy:
         self.sweep_lookback = sweep_lookback_bars
         self.mss_lookback = mss_lookback_bars
         self.sl_buffer = sl_buffer_points
+        self.enable_pd_zone_reanchor = enable_pd_zone_reanchor
 
     # --- Daily bias from 1H BOS ----------------------------------------------
     def _compute_bias(self, df_1h: pd.DataFrame) -> str:
@@ -474,9 +476,14 @@ class SilverBullet2MStrategy:
         current_price = float(df_2m["close"].iloc[-1])
         entry_price = current_price
 
-        # Step 5b: ICT Premium/Discount Zone filter
-        # Bullish → price must be in discount zone (below equilibrium)
-        # Bearish → price must be in premium zone (above equilibrium)
+        # Step 5b: ICT Premium/Discount Zone filter (with dynamic range re-anchoring).
+        #
+        # On expansion days price breaks beyond PDH/PDL making the static PDH-PDL
+        # equilibrium permanently stale.  When a breakout is detected we re-anchor
+        # the dealing range to the most recent structure low/high seen AFTER the
+        # breakout (ICT PO3 "range expansion" concept).
+        #
+        # Re-anchor is controlled by self.enable_pd_zone_reanchor (default True).
         try:
             from datetime import timedelta
             today = df_2m.index[-1].date()
@@ -493,7 +500,132 @@ class SilverBullet2MStrategy:
             _range = _ph - _pl
             if _range > 0:
                 _eq = _pl + (_range * 0.5)
-                if bias == 'bullish' and entry_price > _eq:
+
+                # ── Bullish breakout beyond PDH ─────────────────────────────────
+                if self.enable_pd_zone_reanchor and bias == 'bullish' and entry_price > _ph:
+                    today_bars = df_2m[df_2m.index.date == today]
+                    today_high = float(today_bars['high'].max()) if not today_bars.empty else entry_price
+
+                    # Find first bar where close crossed above _ph (PDH)
+                    breakout_idx = None
+                    for _k in range(len(today_bars)):
+                        if float(today_bars['close'].iloc[_k]) > _ph:
+                            breakout_idx = _k
+                            break
+
+                    _pl_new = None
+                    if breakout_idx is not None:
+                        post_break = today_bars.iloc[breakout_idx:]
+                        if len(post_break) >= 5:
+                            _, _post_sl = swing_indices(
+                                post_break, method="fractal", left_bars=2, right_bars=2
+                            )
+                            if _post_sl:
+                                # Lowest fractal low post-PDH = origin of expansion leg
+                                _pl_new = min(
+                                    float(post_break['low'].iloc[j]) for j in _post_sl
+                                )
+
+                    if _pl_new is None:
+                        # Fallback: the current sweep extreme anchors the new range
+                        _pl_new = sweep['sweep_price']
+                        logger.debug(
+                            "[%s] PD Zone re-anchor fallback: no post-PDH fractals, "
+                            "using sweep_price=%.2f", symbol, _pl_new
+                        )
+
+                    _new_range = today_high - _pl_new
+                    if _new_range > 0:
+                        _eq_new = _pl_new + _new_range * 0.5
+                        logger.info(
+                            "[%s] PD Zone re-anchored (bullish, price=%.2f > PDH=%.2f) | "
+                            "new range [%.2f–%.2f] eq_new=%.2f (orig eq=%.2f)",
+                            symbol, entry_price, _ph, _pl_new, today_high, _eq_new, _eq
+                        )
+                        if entry_price <= _eq_new:
+                            logger.info(
+                                "[%s] PD Zone re-anchored ✅ | price=%.2f in DISCOUNT "
+                                "of new range (eq_new=%.2f), LONG allowed",
+                                symbol, entry_price, _eq_new
+                            )
+                            # fall through — allow the signal
+                        else:
+                            logger.info(
+                                "[%s] PD Zone re-anchored ❌ | price=%.2f in PREMIUM "
+                                "of new range (eq_new=%.2f), skip LONG",
+                                symbol, entry_price, _eq_new
+                            )
+                            return None
+                    else:
+                        logger.info(
+                            "[%s] Silver Bullet: price %.2f in PREMIUM zone (eq=%.2f) "
+                            "[re-anchor invalid: new_range=%.2f], skip LONG",
+                            symbol, entry_price, _eq, _new_range
+                        )
+                        return None
+
+                # ── Bearish breakdown beyond PDL ────────────────────────────────
+                elif self.enable_pd_zone_reanchor and bias == 'bearish' and entry_price < _pl:
+                    today_bars = df_2m[df_2m.index.date == today]
+                    today_low = float(today_bars['low'].min()) if not today_bars.empty else entry_price
+
+                    breakdown_idx = None
+                    for _k in range(len(today_bars)):
+                        if float(today_bars['close'].iloc[_k]) < _pl:
+                            breakdown_idx = _k
+                            break
+
+                    _ph_new = None
+                    if breakdown_idx is not None:
+                        post_break = today_bars.iloc[breakdown_idx:]
+                        if len(post_break) >= 5:
+                            _post_sh, _ = swing_indices(
+                                post_break, method="fractal", left_bars=2, right_bars=2
+                            )
+                            if _post_sh:
+                                # Highest fractal high post-PDL = origin of expansion leg
+                                _ph_new = max(
+                                    float(post_break['high'].iloc[j]) for j in _post_sh
+                                )
+
+                    if _ph_new is None:
+                        _ph_new = sweep['sweep_price']
+                        logger.debug(
+                            "[%s] PD Zone re-anchor fallback: no post-PDL fractals, "
+                            "using sweep_price=%.2f", symbol, _ph_new
+                        )
+
+                    _new_range = _ph_new - today_low
+                    if _new_range > 0:
+                        _eq_new = today_low + _new_range * 0.5
+                        logger.info(
+                            "[%s] PD Zone re-anchored (bearish, price=%.2f < PDL=%.2f) | "
+                            "new range [%.2f–%.2f] eq_new=%.2f (orig eq=%.2f)",
+                            symbol, entry_price, _pl, today_low, _ph_new, _eq_new, _eq
+                        )
+                        if entry_price >= _eq_new:
+                            logger.info(
+                                "[%s] PD Zone re-anchored ✅ | price=%.2f in PREMIUM "
+                                "of new range (eq_new=%.2f), SHORT allowed",
+                                symbol, entry_price, _eq_new
+                            )
+                        else:
+                            logger.info(
+                                "[%s] PD Zone re-anchored ❌ | price=%.2f in DISCOUNT "
+                                "of new range (eq_new=%.2f), skip SHORT",
+                                symbol, entry_price, _eq_new
+                            )
+                            return None
+                    else:
+                        logger.info(
+                            "[%s] Silver Bullet: price %.2f in DISCOUNT zone (eq=%.2f) "
+                            "[re-anchor invalid: new_range=%.2f], skip SHORT",
+                            symbol, entry_price, _eq, _new_range
+                        )
+                        return None
+
+                # ── Normal case: price within PDH–PDL range ──────────────────────
+                elif bias == 'bullish' and entry_price > _eq:
                     logger.info(
                         "[%s] Silver Bullet: price %.2f in PREMIUM zone (eq=%.2f), skip LONG",
                         symbol, entry_price, _eq
@@ -505,11 +637,12 @@ class SilverBullet2MStrategy:
                         symbol, entry_price, _eq
                     )
                     return None
-                logger.info(
-                    "[%s] PD Zone ✅ | price=%.2f eq=%.2f | %s",
-                    symbol, entry_price, _eq,
-                    'DISCOUNT' if bias == 'bullish' else 'PREMIUM'
-                )
+                else:
+                    logger.info(
+                        "[%s] PD Zone ✅ | price=%.2f eq=%.2f | %s",
+                        symbol, entry_price, _eq,
+                        'DISCOUNT' if bias == 'bullish' else 'PREMIUM'
+                    )
         except Exception as e:
             logger.debug("[%s] PD Zone check skipped: %s", symbol, e)
 
@@ -1085,6 +1218,9 @@ def execute_silver_bullet_cycle(strategy, symbol: str) -> dict:
         risk_per_trade_pct=_risk_pct,
         min_rr=float(strategy.parameters.get("min_rr", 3.0)),
         sl_buffer_points=float(strategy.parameters.get("sl_buffer", 5.0)),
+        enable_pd_zone_reanchor=bool(
+            strategy.parameters.get("enable_pd_zone_reanchor", True)
+        ),
     )
 
     try:
