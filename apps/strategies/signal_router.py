@@ -2403,6 +2403,23 @@ def _paper_generic_trade(
     Generic paper trade (futures/equity/crypto)
     """
     from apps.paper_trading.services import open_trade
+    from apps.orders.models import Order as _Order
+
+    # Guard: skip if an open paper position already exists for this user+symbol.
+    # Prevents duplicate orders across Celery cycles when strategy_id was NULL
+    # (pre-fix orders won't be found by the strategy= FK guard in _execute_cycle_inner).
+    _already_open = _Order.objects.filter(
+        user=strategy.user,
+        mode=_Order.Mode.PAPER,
+        status__in=[_Order.Status.OPEN, _Order.Status.PARTIAL],
+        symbol_display__iexact=symbol,
+    ).exists()
+    if _already_open:
+        logger.info(
+            "Paper position already open | strategy=%s | symbol=%s — skipping duplicate",
+            strategy.id, symbol,
+        )
+        return None
 
     trade_data = {
         "symbol": symbol,

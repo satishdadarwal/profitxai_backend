@@ -262,11 +262,25 @@ def open_trade(user, data: dict):
         "strike_price": data.get("strike_price"),
         "leverage": leverage,
     })
-    order.save(update_fields=[
+    # Link to strategy so the per-cycle position guard can find this order.
+    # open_trade callers pass strategy_id in data; place_order() above does
+    # not receive strategy= so strategy_id defaults to NULL without this fix.
+    _sid = data.get("strategy_id")
+    if _sid:
+        try:
+            import uuid as _uuid
+            order.strategy_id = _uuid.UUID(str(_sid))
+        except (ValueError, AttributeError):
+            pass
+
+    _update_fields = [
         "lots", "instrument_type", "option_type", "sl_price", "target_price",
         "entry_price", "current_price", "symbol_display", "entry_time", "notes",
         "updated_at",
-    ])
+    ]
+    if _sid and order.strategy_id:
+        _update_fields.append("strategy_id")
+    order.save(update_fields=_update_fields)
 
     # Deduct margin from paper account balance
     account.balance -= margin
