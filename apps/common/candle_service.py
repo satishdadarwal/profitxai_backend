@@ -393,6 +393,14 @@ def _fetch_from_fyers(
         fyers_sym = _fyers_symbol(symbol)
         resolution = _FYERS_TF_MAP.get(str(timeframe), "15")
 
+        from apps.brokers.rate_limit import check as _rl_check
+        if not _rl_check("fyers"):
+            logger.warning(
+                "rate_limit: fyers candle fetch skipped | symbol=%s — next cycle retries",
+                symbol,
+            )
+            return []
+
         candles = adapter.get_candles(
             symbol=fyers_sym,
             resolution=resolution,
@@ -460,6 +468,14 @@ def _fetch_from_delta(symbol, timeframe, from_ts, to_ts):
         }
 
         logger.debug("Delta candles request | symbol=%s | params=%s", delta_sym, params)
+
+        from apps.brokers.rate_limit import check as _rl_check
+        if not _rl_check("delta"):
+            logger.warning(
+                "rate_limit: delta candle fetch skipped | symbol=%s — next cycle retries",
+                symbol,
+            )
+            return []
 
         # ✅ FIX: (connect_timeout, read_timeout) — timeout=30 infinite connect tha
         r = _requests.get(url, params=params, timeout=(3, 8))

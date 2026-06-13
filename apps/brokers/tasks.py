@@ -130,6 +130,10 @@ def place_broker_order(self, broker_order_id: str):
         if order.order_type and order.order_type.lower() in ("limit", "sl"):
             order_type = "limit"
 
+        if not is_paper_mode:
+            from apps.brokers.rate_limit import wait as _rl_wait
+            _rl_wait(getattr(order.broker_account, "broker", "default"))
+
         result = adapter.place_order(
             symbol=order.symbol,
             side=order.side.lower(),

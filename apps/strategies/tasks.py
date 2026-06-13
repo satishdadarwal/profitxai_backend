@@ -86,6 +86,7 @@ def run_all_active_strategies(algo_filter: str = None):
     default_retry_delay=30,
     soft_time_limit=300,
     time_limit=360,
+    rate_limit='60/m',
 )
 def run_strategy_cycle(self, strategy_id: str):
     from .models import Strategy, UserStrategyPreference
@@ -668,7 +669,9 @@ def auto_square_off():
                 token=account.access_token,
                 log_path="", is_async=False,
             )
+            from apps.brokers.rate_limit import wait as _rl_wait
             # Open positions fetch karo
+            _rl_wait("fyers")
             positions = fyers.positions()
             net_positions = positions.get("netPositions", [])
             closed = 0
@@ -679,6 +682,7 @@ def auto_square_off():
                 symbol = pos.get("symbol", "")
                 # Square off — opposite side
                 side = -1 if qty > 0 else 1
+                _rl_wait("fyers")
                 result = fyers.place_order(data={
                     "symbol": symbol,
                     "qty": abs(qty),
