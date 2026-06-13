@@ -7,8 +7,6 @@ services:
       POSTGRES_DB: ${DB_NAME:-trading_db}
       POSTGRES_USER: ${DB_USER:-postgres}
       POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
-    ports:
-      - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
   redis:
@@ -16,6 +14,31 @@ services:
     restart: always
     ports:
       - "6379:6379"
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    restart: always
+    environment:
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME:-profitxai_db}
+      DB_USER: ${DB_USER:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD:-postgres}
+      POOL_MODE: session
+      DEFAULT_POOL_SIZE: 20
+      MIN_POOL_SIZE: 5
+      RESERVE_POOL_SIZE: 5
+      MAX_CLIENT_CONN: 200
+      SERVER_RESET_QUERY: DISCARD ALL
+      SERVER_IDLE_TIMEOUT: 600
+      IGNORE_STARTUP_PARAMETERS: extra_float_digits,statement_timeout
+      AUTH_TYPE: scram-sha-256
+    ports:
+      - "6432:5432"
+    depends_on:
+      - db
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
   web:
     build: .
     restart: always
@@ -31,6 +54,7 @@ services:
       - "0.0.0.0:8000:8000"
     env_file: .env
     depends_on:
+      - pgbouncer
       - db
       - redis
     dns:
@@ -73,6 +97,7 @@ services:
       - .:/app
     env_file: .env
     depends_on:
+      - pgbouncer
       - db
       - redis
     dns:
@@ -88,6 +113,7 @@ services:
       - .:/app
     env_file: .env
     depends_on:
+      - pgbouncer
       - db
       - redis
     dns:
@@ -103,6 +129,7 @@ services:
       - .:/app
     env_file: .env
     depends_on:
+      - pgbouncer
       - db
       - redis
     dns:
