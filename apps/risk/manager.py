@@ -970,37 +970,64 @@ class RiskManager:
         cache.set(cache_key, count + 1, timeout=60)
         return True
 
-    def _get_daily_pnl(self) -> Decimal:
-        from apps.orders.models import Order
-        cache_key = f"daily_pnl:{self.user.id}:{timezone.now().date()}"
-        cached = cache.get(cache_key)
-        if cached is not None:
-            return Decimal(str(cached))
-        today = timezone.now().date()
-        try:
-            pnl = Order.objects.filter(
-                user=self.user, created_at__date=today, status__in=["closed", "filled"]
-            ).aggregate(total=Sum("realized_pnl"))["total"] or Decimal("0")
-        except Exception:
-            pnl = Decimal("0")  # realized_pnl field missing — skip
-        cache.set(cache_key, float(pnl), timeout=10)
-        return pnl
+    def _get_daily_stats(self) -> dict:
+        """Single cached DB call returning daily_pnl, trade_count, open_count.
 
-    def _get_daily_trade_count(self) -> int:
-        from apps.orders.models import Order
-        cache_key = f"daily_trades:{self.user.id}:{timezone.now().date()}"
+        One aggregate query covers all three values.  DailyPnlSnapshot is preferred
+        for PnL/trade_count when available (populated by the P2.3 write task).
+
+        TTL 60s: conscious trade-off — PnL staleness window extended from 10s.
+        Worst case: a loss breaching max_loss_per_day is caught within 60s.
+        """
+        today = timezone.now().date()
+        cache_key = f"daily_stats:{self.user.id}:{today}"
         cached = cache.get(cache_key)
         if cached is not None:
             return cached
-        count = Order.objects.filter(
-            user=self.user, created_at__date=timezone.now().date()
-        ).count()
-        cache.set(cache_key, count, timeout=10)
-        return count
+
+        from apps.orders.models import Order
+
+        try:
+            agg = Order.objects.filter(user=self.user).aggregate(
+                pnl=Sum(
+                    "realized_pnl",
+                    filter=Q(created_at__date=today, status__in=["closed", "filled"]),
+                ),
+                trade_count=Count("id", filter=Q(created_at__date=today)),
+                open_count=Count("id", filter=Q(status="filled", mode="live")),
+            )
+            pnl         = float(agg["pnl"] or 0)
+            trade_count = agg["trade_count"] or 0
+            open_count  = agg["open_count"] or 0
+        except Exception as exc:
+            logger.error("_get_daily_stats aggregate error | user=%s | %s", self.user.id, exc)
+            pnl, trade_count, open_count = 0.0, 0, 0
+
+        # Prefer DailyPnlSnapshot when populated (P2.3 write task).
+        # Silent no-op until that task exists.
+        try:
+            from apps.orders.models import DailyPnlSnapshot
+            snap = DailyPnlSnapshot.objects.filter(
+                user=self.user, date=today, mode="live", market_type="all"
+            ).first()
+            if snap is not None:
+                pnl         = float(snap.realised_pnl)   # British spelling in model
+                trade_count = snap.total_trades
+        except Exception as exc:
+            logger.debug("_get_daily_stats: snapshot unavailable | %s", exc)
+
+        stats = {"daily_pnl": pnl, "trade_count": trade_count, "open_count": open_count}
+        cache.set(cache_key, stats, timeout=60)
+        return stats
+
+    def _get_daily_pnl(self) -> Decimal:
+        return Decimal(str(self._get_daily_stats()["daily_pnl"]))
+
+    def _get_daily_trade_count(self) -> int:
+        return self._get_daily_stats()["trade_count"]
 
     def _get_open_position_count(self) -> int:
-        from apps.orders.models import Order
-        return Order.objects.filter(user=self.user, status="filled", mode="live").count()
+        return self._get_daily_stats()["open_count"]
 
     def _check_drawdown_limit(self) -> bool:
         from apps.wallet.models import Wallet
