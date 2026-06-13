@@ -83,22 +83,22 @@ class DeltaFeedManager:
         self._loop.run_forever()
 
     def _broadcast(self, group: str, payload: dict):
-        """Thread-safe broadcast — run_coroutine_threadsafe use karo"""
+        """Thread-safe broadcast — fire-and-forget, never blocks poll thread"""
         if self._loop is None or not self._loop.is_running():
             return
-        try:
-            layer = self._get_layer()
-            if not layer:
-                return
-            future = asyncio.run_coroutine_threadsafe(
-                layer.group_send(group, payload),
-                self._loop,
-            )
-            future.result(timeout=2)  # 2s timeout — Redis slow ho toh skip
-        except TimeoutError:
-            logger.warning("Delta broadcast timeout [%s]", group)
-        except Exception as e:
-            logger.error("Delta broadcast error [%s]: %s", group, e)
+        layer = self._get_layer()
+        if not layer:
+            return
+        future = asyncio.run_coroutine_threadsafe(
+            layer.group_send(group, payload),
+            self._loop,
+        )
+
+        def _on_done(f):
+            if not f.cancelled() and f.exception():
+                logger.warning("Delta broadcast failed [%s]: %s", group, f.exception())
+
+        future.add_done_callback(_on_done)
 
     def subscribe(self, symbol: str):
         clean = normalize_symbol(symbol)
