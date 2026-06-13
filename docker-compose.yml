@@ -81,7 +81,7 @@ services:
   celery-strategies:
     build: .
     restart: always
-    command: celery -A config worker -Q strategies,default -c 4 -l info -E -n strategies@%h
+    command: celery -A config worker -Q strategies,signals,default -c 6 -l info -E -n strategies@%h
     environment:
       CELERY_WORKER_RUNNING: "1"
     volumes:
