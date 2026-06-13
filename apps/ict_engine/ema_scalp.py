@@ -615,8 +615,9 @@ def execute_ema_scalp_cycle(strategy, symbol: str) -> dict:
             return _null_ema_signal(symbol)
 
     # Build strategy instance
+    from apps.risk.manager import get_user_capital
     ema = EMAScalpStrategy(
-        account_balance    = float(strategy.parameters.get("capital", 100_000)),
+        account_balance    = get_user_capital(strategy.user, strategy.mode),
         risk_per_trade_pct = float(strategy.parameters.get("risk_pct", 1.0)),
         fast_ema_period    = int(strategy.parameters.get("fast_ema", 9)),
         slow_ema_period    = int(strategy.parameters.get("slow_ema", 21)),

@@ -1,3 +1,4 @@
+import json
 from decimal import Decimal
 from rest_framework import serializers
 from .models import PaperAccount, PaperTopUp
@@ -17,7 +18,7 @@ class OrderSerializer(serializers.ModelSerializer):
     # Compat aliases for old PaperTrade field names
     asset_type = serializers.SerializerMethodField()
     display_name = serializers.SerializerMethodField()
-    side = serializers.CharField(source="side")
+    side = serializers.CharField()
     pnl = serializers.DecimalField(source="realized_pnl", max_digits=14, decimal_places=2, read_only=True)
     margin_used = serializers.SerializerMethodField()
     stop_loss = serializers.DecimalField(source="sl_price", max_digits=14, decimal_places=4, read_only=True)
@@ -103,23 +104,31 @@ class OrderSerializer(serializers.ModelSerializer):
             return float(Decimal(str(obj.entry_price)) * Decimal(str(obj.quantity)))
         return 0.0
 
+    def _get_notes(self, obj):
+        try:
+            return json.loads(obj.notes) if obj.notes else {}
+        except (ValueError, TypeError):
+            return {}
+
     def get_setup_type(self, obj):
-        return obj.metadata.get("setup_type", "") if obj.metadata else ""
+        return self._get_notes(obj).get("setup_type", "")
 
     def get_strategy_id(self, obj):
-        return obj.metadata.get("strategy_id", "") if obj.metadata else ""
+        if obj.strategy_id:
+            return str(obj.strategy_id)
+        return self._get_notes(obj).get("strategy_id", "")
 
     def get_nifty_spot_at_entry(self, obj):
-        return obj.metadata.get("nifty_spot_at_entry", 0) if obj.metadata else 0
+        return self._get_notes(obj).get("nifty_spot_at_entry", 0)
 
     def get_strike_price(self, obj):
-        return obj.metadata.get("strike_price") if obj.metadata else None
+        return self._get_notes(obj).get("strike_price")
 
     def get_lot_size(self, obj):
         return obj.lots or 1
 
     def get_leverage(self, obj):
-        return obj.metadata.get("leverage", 1) if obj.metadata else 1
+        return self._get_notes(obj).get("leverage", 1)
 
     def get_unrealized_pnl(self, obj):
         if obj.status != "open" or not obj.current_price or not obj.entry_price:

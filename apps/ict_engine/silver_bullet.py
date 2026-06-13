@@ -1262,14 +1262,8 @@ def execute_silver_bullet_cycle(strategy, symbol: str) -> dict:
     if df_1h.empty or df_2m.empty:
         return _null_sb_signal(symbol)
 
-    # ── User ka actual capital aur risk % fetch karo ─────────────
-    try:
-        from apps.wallet.models import Wallet
-        from decimal import Decimal
-        _wallet = Wallet.objects.get(user=strategy.user, currency="INR")
-        _capital = float(_wallet.available_balance + _wallet.locked_balance)
-    except Exception:
-        _capital = float(strategy.parameters.get("capital", 100_000))
+    from apps.risk.manager import get_user_capital
+    _capital = get_user_capital(strategy.user, strategy.mode)
 
     try:
         _tp = strategy.user.trading_profile

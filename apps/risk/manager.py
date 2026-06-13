@@ -90,6 +90,45 @@ CAPITAL_RISK_TIERS: List[Tuple[Decimal, Decimal, Decimal]] = [
 ]
 
 
+def get_user_capital(user, mode: str) -> float:
+    """
+    Returns user's current trading capital based on mode.
+    paper: PaperAccount.balance (live DB, reflects top-ups).
+    live:  Wallet.available_balance + locked_balance, cached 5 min.
+           Falls back to last cached value on fetch failure.
+           Returns 0.0 if no cache exists — forces calculate_lots to 0 lots
+           rather than risking real capital on a guessed number.
+    """
+    if mode == "paper":
+        from apps.paper_trading.models import PaperAccount
+        try:
+            return float(PaperAccount.objects.get(user=user).balance)
+        except Exception as e:
+            logger.error("get_user_capital paper error | user=%s | %s", user.id, e)
+            return 0.0
+    else:
+        from apps.wallet.models import Wallet
+        cache_key = f"wallet_capital:{user.id}"
+        try:
+            w = Wallet.objects.get(user=user, currency="INR")
+            capital = float(w.available_balance + w.locked_balance)
+            cache.set(cache_key, capital, timeout=300)
+            return capital
+        except Exception as e:
+            cached = cache.get(cache_key)
+            if cached is not None:
+                logger.warning(
+                    "get_user_capital live fetch failed | user=%s | using cached=%.0f | err=%s",
+                    user.id, cached, e,
+                )
+                return float(cached)
+            logger.error(
+                "get_user_capital live fetch failed, no cache | user=%s | err=%s — returning 0",
+                user.id, e,
+            )
+            return 0.0
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  RiskLimits dataclass
 # ══════════════════════════════════════════════════════════════════════════════

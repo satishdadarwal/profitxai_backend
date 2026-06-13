@@ -814,7 +814,8 @@ def execute_cycle_ict(strategy, symbol: str) -> dict:
     # ✅ FIX: risk_config.qty se max position size cap karo
     _max_qty = int(strategy.risk_config.get("qty", 1))
     _risk_pct = float(strategy.risk_config.get("risk_per_trade_pct", 1.0))
-    _capital = float(strategy.risk_config.get("capital", 10000))
+    from apps.risk.manager import get_user_capital
+    _capital = get_user_capital(strategy.user, strategy.mode)
     _risk_params = RiskParameters(
         account_balance=_capital,
         risk_per_trade_pct=_risk_pct,
