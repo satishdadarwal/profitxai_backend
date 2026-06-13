@@ -847,63 +847,82 @@ def execute_cycle_ict(strategy, symbol: str) -> dict:
     # jisko Flutter app ka Auto Paper page fetch kar sake.
     paper_order = None
     if strategy.mode == "paper" and sig.direction is not None:
-        try:
-            from apps.paper_trading.services import open_trade
-            from decimal import Decimal as _D
+        from apps.orders.models import Order as _Order
+        _trade_user = getattr(strategy, "_subscriber_user", None) or strategy.user
 
-            entry  = float(sig.entry_price)
-            sl     = sig.stop_loss    or round(entry * 0.99, 2)
-            tp     = sig.take_profit_1 or round(entry * 1.02, 2)
-            size   = 1  # Paper mode mein sirf 1 lot — position_size margin exceed karta hai
+        # Guard: skip if an open paper position already exists for this user+symbol.
+        # Without this, every Celery cycle that sees a qualifying signal creates a
+        # fresh Order — the downstream _handle_ict_signal guard can't catch them
+        # because orders created here had strategy_id=None (now fixed below too).
+        _already_open = _Order.objects.filter(
+            user=_trade_user,
+            mode=_Order.Mode.PAPER,
+            status__in=[_Order.Status.OPEN, _Order.Status.PARTIAL],
+            symbol_display__iexact=sig.symbol,
+        ).exists()
 
-            # instrument_type detect karo
-            instr = getattr(strategy, "instrument_type", "crypto")
-
-            # Crypto symbols ke liye asset_type = crypto
-            symbol_up = sig.symbol.upper()
-            if any(k in symbol_up for k in ("BTC", "ETH", "SOL", "USDT", "BNB", "XRP")):
-                asset_type = "crypto"
-            elif instr in ("futures", "perp"):
-                asset_type = "futures"
-            elif instr == "options":
-                asset_type = "option"
-            else:
-                asset_type = instr or "crypto"
-
-            direction = sig.direction.value  # "long"/"short" → "buy"/"sell"
-            side = "buy" if direction in ("long", "buy") else "sell"
-
-            trade_data = {
-                "symbol":          sig.symbol,
-                "asset_type":      asset_type,
-                "instrument_type": instr,
-                "display_name":    sig.symbol,
-                "side":            side,
-                "quantity":        size,
-                "lot_size":        1,
-                "leverage":        1,
-                "entry_price":     entry,
-                "stop_loss":       sl,
-                "target_price":    tp,
-                "setup_type":      f"Auto-{getattr(strategy, 'algo_name', 'ict')}",
-                "strategy_id":     str(strategy.id),
-            }
-
-            # #BUG-FIX: strategy.user = creator hota hai (Satish)
-            # Global strategy mein subscriber ka user use karo
-            _trade_user = getattr(strategy, "_subscriber_user", None) or strategy.user
-            paper_order = open_trade(_trade_user, trade_data)
+        if _already_open:
             logger.info(
-                "✅ Paper trade created | id=%s | symbol=%s | side=%s | entry=%.4f | "
-                "sl=%.4f | tp=%.4f | strategy=%s",
-                paper_order.id if paper_order else "?",
-                sig.symbol, side, entry, sl, tp, strategy.id,
+                "⏭ Paper trade skipped — position already open | "
+                "user=%s | symbol=%s | strategy=%s",
+                _trade_user.pk, sig.symbol, strategy.id,
             )
-        except Exception as _pe:
-            logger.error(
-                "❌ Paper trade creation failed | strategy=%s | symbol=%s | err=%s",
-                strategy.id, sig.symbol, _pe, exc_info=True,
-            )
+        else:
+            try:
+                from apps.paper_trading.services import open_trade
+
+                entry  = float(sig.entry_price)
+                sl     = sig.stop_loss    or round(entry * 0.99, 2)
+                tp     = sig.take_profit_1 or round(entry * 1.02, 2)
+                size   = 1  # Paper mode: 1 lot to stay within margin limits
+
+                instr = getattr(strategy, "instrument_type", "crypto")
+                symbol_up = sig.symbol.upper()
+                if any(k in symbol_up for k in ("BTC", "ETH", "SOL", "USDT", "BNB", "XRP")):
+                    asset_type = "crypto"
+                elif instr in ("futures", "perp"):
+                    asset_type = "futures"
+                elif instr == "options":
+                    asset_type = "option"
+                else:
+                    asset_type = instr or "crypto"
+
+                direction = sig.direction.value  # "long"/"short" → "buy"/"sell"
+                side = "buy" if direction in ("long", "buy") else "sell"
+
+                trade_data = {
+                    "symbol":          sig.symbol,
+                    "asset_type":      asset_type,
+                    "instrument_type": instr,
+                    "display_name":    sig.symbol,
+                    "side":            side,
+                    "quantity":        size,
+                    "lot_size":        1,
+                    "leverage":        1,
+                    "entry_price":     entry,
+                    "stop_loss":       sl,
+                    "target_price":    tp,
+                    "setup_type":      f"Auto-{getattr(strategy, 'algo_name', 'ict')}",
+                    "strategy_id":     str(strategy.id),
+                }
+
+                paper_order = open_trade(_trade_user, trade_data)
+                # Link order to strategy so _handle_ict_signal's guard can find it
+                # on the next cycle (place_order() creates with strategy=None by default).
+                if paper_order and getattr(strategy, "id", None):
+                    paper_order.strategy_id = strategy.id
+                    paper_order.save(update_fields=["strategy_id", "updated_at"])
+                logger.info(
+                    "✅ Paper trade created | id=%s | symbol=%s | side=%s | entry=%.4f | "
+                    "sl=%.4f | tp=%.4f | strategy=%s",
+                    paper_order.id if paper_order else "?",
+                    sig.symbol, side, entry, sl, tp, strategy.id,
+                )
+            except Exception as _pe:
+                logger.error(
+                    "❌ Paper trade creation failed | strategy=%s | symbol=%s | err=%s",
+                    strategy.id, sig.symbol, _pe, exc_info=True,
+                )
 
     return {
         "signal_type": sig.direction.value if sig.direction else "hold",

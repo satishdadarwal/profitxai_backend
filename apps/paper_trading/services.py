@@ -1,3 +1,4 @@
+import json
 import logging
 from decimal import Decimal
 from django.utils import timezone
@@ -155,7 +156,7 @@ def open_trade(user, data: dict):
     """
     Open a new paper trade (creates an Order with mode=paper).
     """
-    from apps.orders.models import Order, Asset
+    from apps.orders.models import Order
 
     account, _ = PaperAccount.objects.get_or_create(user=user)
 
@@ -218,54 +219,54 @@ def open_trade(user, data: dict):
             f"Insufficient balance. Need {margin:.2f}, Available {account.available_balance:.2f}"
         )
 
-    # Map asset_type to Order.InstrumentType
+    # Map asset_type → instrument_type string (plain CharField, no enum)
     instrument_map = {
-        "option": Order.InstrumentType.OPTIONS,
-        "options": Order.InstrumentType.OPTIONS,
-        "futures": Order.InstrumentType.FUTURES,
-        "crypto": Order.InstrumentType.FUTURES,
-        "equity": Order.InstrumentType.EQUITY,
+        "option": "options",
+        "options": "options",
+        "futures": "futures",
+        "crypto": "futures",
+        "equity": "equity",
     }
-    order_instrument_type = instrument_map.get(asset_type, Order.InstrumentType.OPTIONS)
+    order_instrument_type = instrument_map.get(asset_type, "options")
 
-    # Get or create asset
-    asset, _ = Asset.objects.get_or_create(
-        symbol=symbol,
-        defaults={
-            "name": data.get("display_name", symbol),
-            "instrument_type": order_instrument_type,
-        },
-    )
-
-    # Map side
     order_side = Order.Side.BUY if side in ("buy", "long") else Order.Side.SELL
 
-    metadata = {
+    # Route through centralized Order creation; Asset get-or-create is
+    # handled inside place_order() → _get_active_asset().
+    from apps.orders.services import place_order
+
+    order = place_order(
+        user=user,
+        asset_symbol=symbol,
+        side=order_side,
+        order_type=Order.OrderType.LIMIT,
+        quantity=Decimal(str(int(quantity * lot_size))),
+        limit_price=entry_price,
+        mode=Order.Mode.PAPER,
+    )
+
+    # Save paper-specific fields not set by place_order()
+    order.lots = int(quantity)
+    order.instrument_type = order_instrument_type
+    order.option_type = data.get("option_type", "")
+    order.sl_price = stop_loss
+    order.target_price = target_price
+    order.entry_price = entry_price
+    order.current_price = entry_price
+    order.symbol_display = data.get("display_name", symbol)
+    order.entry_time = timezone.now()
+    order.notes = json.dumps({
         "setup_type": data.get("setup_type", ""),
         "strategy_id": data.get("strategy_id", ""),
         "nifty_spot_at_entry": data.get("nifty_spot_at_entry", 0),
         "strike_price": data.get("strike_price"),
         "leverage": leverage,
-    }
-
-    order = Order.objects.create(
-        user=user,
-        asset=asset,
-        mode=Order.Mode.PAPER,
-        instrument_type=order_instrument_type,
-        side=order_side,
-        quantity=int(quantity * lot_size),
-        lots=int(quantity),
-        entry_price=entry_price,
-        current_price=entry_price,
-        sl_price=stop_loss,
-        target_price=target_price,
-        option_type=data.get("option_type", ""),
-        symbol_display=data.get("display_name", symbol),
-        status=Order.Status.OPEN,
-        entry_time=timezone.now(),
-        metadata=metadata,
-    )
+    })
+    order.save(update_fields=[
+        "lots", "instrument_type", "option_type", "sl_price", "target_price",
+        "entry_price", "current_price", "symbol_display", "entry_time", "notes",
+        "updated_at",
+    ])
 
     # Deduct margin from paper account balance
     account.balance -= margin

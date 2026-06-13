@@ -645,32 +645,52 @@ def execute_ema_scalp_cycle(strategy, symbol: str) -> dict:
     if sig is None:
         return _null_ema_signal(symbol)
 
-    # Open paper trade
+    # Open paper trade — guarded against duplicates
     try:
         from apps.paper_trading.services import open_trade
+        from apps.orders.models import Order as _Order
 
-        qty_str = str(int(sig.quantity * sig.lot_size)) \
-                  if asset_type == "options" else str(sig.quantity)
+        # Guard: skip if an open paper position already exists for this user+symbol.
+        _already_open = _Order.objects.filter(
+            user=strategy.user,
+            mode=_Order.Mode.PAPER,
+            status__in=[_Order.Status.OPEN, _Order.Status.PARTIAL],
+            symbol_display__iexact=sig.symbol,
+        ).exists()
 
-        trade_data = {
-            "symbol":       sig.symbol,
-            "asset_type":   asset_type,
-            "side":         sig.direction.value,
-            "entry_price":  str(sig.entry_price),
-            "stop_loss":    str(sig.stop_loss),
-            "target_price": str(sig.take_profit),
-            "quantity":     qty_str,
-            "lot_size":     sig.lot_size,
-            "leverage":     int(strategy.parameters.get("leverage", 1)),
-            "setup_type":   "ema_scalp",
-            "strategy_id":  str(strategy.id),
-            "display_name": f"EMA Scalp {sig.symbol}",
-            "option_type":  sig.option_type,
-            "strike_price": str(sig.strike) if sig.strike else "",
-        }
-        trade = open_trade(strategy.user, trade_data)
-        logger.info("EMA Scalp trade opened | %s | id=%s | %s @ %.4f",
-                    sig.symbol, trade.id, sig.direction.value, sig.entry_price)
+        if _already_open:
+            logger.info(
+                "⏭ EMA Scalp paper trade skipped — position already open | "
+                "symbol=%s | strategy=%s",
+                sig.symbol, strategy.id,
+            )
+        else:
+            qty_str = str(int(sig.quantity * sig.lot_size)) \
+                      if asset_type == "options" else str(sig.quantity)
+
+            trade_data = {
+                "symbol":       sig.symbol,
+                "asset_type":   asset_type,
+                "side":         sig.direction.value,
+                "entry_price":  str(sig.entry_price),
+                "stop_loss":    str(sig.stop_loss),
+                "target_price": str(sig.take_profit),
+                "quantity":     qty_str,
+                "lot_size":     sig.lot_size,
+                "leverage":     int(strategy.parameters.get("leverage", 1)),
+                "setup_type":   "ema_scalp",
+                "strategy_id":  str(strategy.id),
+                "display_name": f"EMA Scalp {sig.symbol}",
+                "option_type":  sig.option_type,
+                "strike_price": str(sig.strike) if sig.strike else "",
+            }
+            trade = open_trade(strategy.user, trade_data)
+            # Link to strategy so _handle_ict_signal's guard can find it next cycle.
+            if trade and getattr(strategy, "id", None):
+                trade.strategy_id = strategy.id
+                trade.save(update_fields=["strategy_id", "updated_at"])
+            logger.info("EMA Scalp trade opened | %s | id=%s | %s @ %.4f",
+                        sig.symbol, trade.id, sig.direction.value, sig.entry_price)
     except Exception as e:
         logger.error("open_trade failed | %s | %s", symbol, e, exc_info=True)
 

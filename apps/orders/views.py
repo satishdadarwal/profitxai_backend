@@ -646,15 +646,19 @@ class TradeJournalListView(APIView):
         ).exclude(side=None).exclude(status="rejected").select_related("asset").order_by("-created_at")
         if mode_filter != "all":
             order_qs = order_qs.filter(mode=mode_filter)
+        _CRYPTO_SYMS = ["BTC", "ETH", "SOL", "USDT", "USD", "PERP"]
         if market_type == "indian":
-            order_qs = order_qs.exclude(notes__icontains="USD")
+            q = Q()
+            for kw in _CRYPTO_SYMS:
+                q |= Q(symbol_display__icontains=kw) | Q(asset__symbol__icontains=kw)
+            order_qs = order_qs.exclude(q)
         elif market_type == "crypto":
-            order_qs = order_qs.filter(
-                Q(notes__icontains="BTC") | Q(notes__icontains="ETH") |
-                Q(notes__icontains="SOL") | Q(notes__icontains="USD")
-            )
+            q = Q()
+            for kw in _CRYPTO_SYMS:
+                q |= Q(symbol_display__icontains=kw) | Q(asset__symbol__icontains=kw)
+            order_qs = order_qs.filter(q)
         for o in order_qs:
-            sym = o.notes or (o.asset.symbol if o.asset else "")
+            sym = o.symbol_display or (o.asset.symbol if o.asset else "")
             is_crypto = any(k in sym.upper() for k in ["USDT","BTC","ETH","SOL","PERP"])
             mtype = "crypto" if is_crypto else "indian"
             side = o.side or "buy"
@@ -678,7 +682,11 @@ class TradeJournalListView(APIView):
                 "market_type": mtype,
                 "market_display": "Crypto Market" if is_crypto else "Indian Market",
                 "side": side, "mode": o.mode or "live",
+                "status": o.status or "open",
                 "quantity": qty, "price": price,
+                "entry_price": float(o.entry_price) if o.entry_price else price,
+                "sl_price": float(o.sl_price) if o.sl_price else None,
+                "target_price": float(o.target_price) if o.target_price else None,
                 "amount": qty * price, "fee": 0.0,
                 "realized_pnl": float(o.realized_pnl) if o.realized_pnl is not None else None,
                 "net_pnl": float(o.realized_pnl) if o.realized_pnl is not None else None,
