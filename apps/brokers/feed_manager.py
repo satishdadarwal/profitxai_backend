@@ -7,11 +7,11 @@
 # ✅ _update_ltp_cache() — RiskManager price freshness check ke liye
 # ✅ Throttle: per-user 1s interval — Flutter pe flood nahi hoga
 
+import asyncio
 import logging
 import time
 from decimal import Decimal
 
-from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
 
 logger = logging.getLogger(__name__)
@@ -64,14 +64,24 @@ def on_price_tick(symbol: str, ltp: float, extra_data: dict = None):
             "volume":    payload.get("volume", 0),
         })
 
+        # Use delta feed's event loop for thread-safe channel send.
+        # async_to_sync blocked asgiref's single_thread_executor (the sole
+        # thread that runs ALL Django sync views), causing the login hang.
         try:
-            async_to_sync(channel_layer.group_send)(
-                "market", {"type": "market_update", "data": payload}
-            )
-        except RuntimeError as _e:
+            from apps.websocket.delta_feed import delta_feed_manager
+            loop = delta_feed_manager._loop
+            if loop is not None and loop.is_running():
+                future = asyncio.run_coroutine_threadsafe(
+                    channel_layer.group_send(
+                        "market", {"type": "market_update", "data": payload}
+                    ),
+                    loop,
+                )
+                future.result(timeout=2)
+        except Exception as _e:
             if 'interpreter shutdown' in str(_e) or 'cannot schedule' in str(_e):
                 return
-            raise
+            logger.debug("on_price_tick market broadcast error: %s", _e)
 
         _update_ltp_cache(symbol, ltp)
         _update_position_pnl(symbol, ltp)

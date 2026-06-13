@@ -15,17 +15,47 @@
 #
 #    push_market_update(data={"symbol": "BTC", "price": 65000, "ts": 1710000000})
 
+import asyncio
+import logging
+
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
+
+logger = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────
 #  Internal helper
 # ─────────────────────────────────────────────────────────────────
 def _send(group: str, message: dict):
-    """Channel layer pe group_send karta hai — sync wrapper."""
+    """Channel layer pe group_send karta hai.
+
+    Background threads (delta-poll, Celery workers) ke liye delta feed ka
+    event loop use karta hai — async_to_sync se asgiref SyncToAsync.
+    single_thread_executor ke saath conflict avoid hota hai jo login hang
+    ka root cause tha.  ASGI/Daphne main loop pe koi load nahi padta.
+    """
+    # Prefer the delta feed's dedicated event loop — thread-safe and avoids
+    # creating new ThreadPoolExecutors per call (the old async_to_sync path).
+    try:
+        from apps.websocket.delta_feed import delta_feed_manager
+        loop = delta_feed_manager._loop
+        if loop is not None and loop.is_running():
+            layer = get_channel_layer()
+            if layer:
+                future = asyncio.run_coroutine_threadsafe(
+                    layer.group_send(group, message), loop
+                )
+                future.result(timeout=2)
+                return
+    except Exception as e:
+        logger.debug("_send via delta loop failed, falling back: %s", e)
+
+    # Fallback: async_to_sync (works correctly when called from an ASGI
+    # executor thread, e.g. a database_sync_to_async context).
     layer = get_channel_layer()
-    async_to_sync(layer.group_send)(group, message)
+    if layer:
+        async_to_sync(layer.group_send)(group, message)
 
 
 # ─────────────────────────────────────────────────────────────────

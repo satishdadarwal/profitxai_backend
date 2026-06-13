@@ -113,31 +113,36 @@ def _notify_position_created(user_id: int, position):
     """Send WebSocket notification when position is created"""
     try:
         from channels.layers import get_channel_layer
-        import asyncio
-        
-        channel_layer = get_channel_layer()
-        
-        asyncio.get_event_loop().run_until_complete(
-            channel_layer.group_send(
-                f"user_{user_id}",
-                {
-                    'type': 'position_created',
-                    'data': {
-                        'position_id': str(position.id),
-                        'symbol': position.symbol,
-                        'side': position.side,
-                        'quantity': float(position.quantity),
-                        'entry_price': float(position.avg_entry_price),
-                        'stop_loss': float(position.stop_loss) if position.stop_loss else None,
-                        'take_profit': float(position.take_profit) if position.take_profit else None,
-                        'mode': position.mode,
-                        'message': f'Position opened: {position.side.upper()} {position.quantity} {position.symbol}'
-                    }
-                }
-            )
+        from apps.websocket.push import push_notification
+
+        push_notification(
+            user_id=user_id,
+            level="info",
+            title="Position Opened",
+            body=f'Position opened: {position.side.upper()} {position.quantity} {position.symbol}',
         )
-        
-        logger.info(f"📡 Position creation notification sent to user {user_id}")
-        
+
+        # Also send structured position data via push.py which handles
+        # thread-safe channel sends correctly (no asyncio.get_event_loop()).
+        from apps.websocket.push import _send
+        _send(
+            f"user_{user_id}",
+            {
+                'type': 'position_created',
+                'data': {
+                    'position_id': str(position.id),
+                    'symbol': position.symbol,
+                    'side': position.side,
+                    'quantity': float(position.quantity),
+                    'entry_price': float(position.avg_entry_price),
+                    'stop_loss': float(position.stop_loss) if position.stop_loss else None,
+                    'take_profit': float(position.take_profit) if position.take_profit else None,
+                    'mode': position.mode,
+                }
+            },
+        )
+
+        logger.info(f"Position creation notification sent to user {user_id}")
+
     except Exception as e:
         logger.error(f"Failed to send position creation notification: {e}")
