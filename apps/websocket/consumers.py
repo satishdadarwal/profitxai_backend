@@ -60,9 +60,14 @@ def reverse_map_symbol(symbol: str) -> str:
     return REVERSE_SYMBOL_MAP.get(symbol, symbol)
 
 
+_CRYPTO_DISPLAY_SYMBOLS = {
+    "BTCUSD", "ETHUSD", "SOLUSD", "BNBUSD",
+    "XRPUSD", "DOGEUSD", "ADAUSD", "AVAXUSD",
+}
+
 def is_delta_symbol(symbol: str) -> bool:
     sym = symbol.upper()
-    return "-USDT" in sym or sym.startswith("DELTA:")
+    return "-USDT" in sym or sym.startswith("DELTA:") or sym in _CRYPTO_DISPLAY_SYMBOLS
 
 
 def _symbols_match(tick_symbol: str, subscribed_symbols: set) -> bool:
@@ -591,6 +596,9 @@ class MarketConsumer(BaseConsumer):
         if not data:
             data = {k: v for k, v in event.items() if k != "type"}
         await self.send_json({"type": "new_signal", **data})
+
+    async def pnl_update(self, event):
+        await self.send_json({"type": "pnl_update", **event["data"]})
 
 
 # ─────────────────────────────────────────────────────────────

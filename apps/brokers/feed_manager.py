@@ -19,7 +19,16 @@ logger = logging.getLogger(__name__)
 _feeds: dict = {}
 _user_symbols: dict = {}   # user_id → set of symbols
 _last_pnl_push: dict = {}  # user_id → last push Unix timestamp
+_last_order_push: dict = {}  # user_id → last push Unix timestamp (paper orders)
 PNL_PUSH_INTERVAL = 1.0    # seconds — throttle per user
+
+# Reverse map: Delta tick format → paper order symbol_display format
+_DELTA_TO_DISPLAY = {
+    "ETH-USDT": "ETHUSD", "BTC-USDT": "BTCUSD",
+    "SOL-USDT": "SOLUSD", "BNB-USDT": "BNBUSD",
+    "XRP-USDT": "XRPUSD", "DOGE-USDT": "DOGEUSD",
+    "ADA-USDT": "ADAUSD", "AVAX-USDT": "AVAXUSD",
+}
 
 
 def _sanitize(symbol: str) -> str:
@@ -66,26 +75,7 @@ def on_price_tick(symbol: str, ltp: float, extra_data: dict = None):
 
         _update_ltp_cache(symbol, ltp)
         _update_position_pnl(symbol, ltp)
-        try:
-            from decimal import Decimal as _D
-            from apps.orders.models import Order as _Order
-            _ltp = _D(str(ltp))
-            _clean = symbol.replace("NSE:", "").replace("-INDEX", "").replace("BSE:", "").strip()
-            _open_orders = _Order.objects.filter(
-                symbol_display__icontains=_clean,
-                status='open',
-            ).only('id', 'side', 'entry_price', 'quantity', 'current_price', 'unrealized_pnl')
-            for _ord in _open_orders:
-                if _ord.entry_price and _ord.quantity:
-                    if _ord.side == 'buy':
-                        _upnl = (_ltp - _ord.entry_price) * _ord.quantity
-                    else:
-                        _upnl = (_ord.entry_price - _ltp) * _ord.quantity
-                    _ord.current_price = _ltp
-                    _ord.unrealized_pnl = _upnl
-                    _ord.save(update_fields=['current_price', 'unrealized_pnl', 'updated_at'])
-        except Exception as _pe:
-            logger.error("Order tick update | %s | %s", symbol, _pe)
+        _update_open_order_pnl(symbol, ltp)
 
     except Exception as e:
         logger.error("on_price_tick error | symbol=%s | %s", symbol, e)
@@ -99,6 +89,86 @@ def _update_ltp_cache(symbol: str, ltp: float):
         cache.set(f"ltp:{symbol}", ltp, timeout=60)
     except Exception as e:
         logger.debug("_update_ltp_cache error | symbol=%s | %s", symbol, e)
+
+
+def _update_open_order_pnl(symbol: str, ltp: float):
+    """
+    Update current_price + unrealized_pnl on all open Order rows that match
+    this tick symbol (both paper and live modes).
+
+    Handles the Delta vs display-symbol mismatch:
+      ETH-USDT (tick) → ETHUSD (symbol_display in DB)
+    Also sends a throttled pnl_update WS push per user so Flutter
+    paper/live screens update in real-time.
+    """
+    try:
+        from decimal import Decimal as _D
+        from django.db.models import Q
+        from apps.orders.models import Order as _Order
+        from apps.websocket.push import push_pnl_update
+
+        _ltp = _D(str(ltp))
+        _clean = symbol.replace("NSE:", "").replace("-INDEX", "").replace("BSE:", "").strip()
+        _display = _DELTA_TO_DISPLAY.get(_clean.upper(), _clean)
+
+        _open_orders = list(
+            _Order.objects.filter(
+                Q(symbol_display__icontains=_clean) | Q(symbol_display__iexact=_display),
+                status="open",
+            ).only("id", "user_id", "side", "entry_price", "quantity",
+                   "current_price", "unrealized_pnl", "mode")
+        )
+
+        if not _open_orders:
+            return
+
+        by_user: dict = {}
+        for _ord in _open_orders:
+            if not (_ord.entry_price and _ord.quantity):
+                continue
+            if _ord.side == "buy":
+                _upnl = (_ltp - _ord.entry_price) * _ord.quantity
+            else:
+                _upnl = (_ord.entry_price - _ltp) * _ord.quantity
+            _ord.current_price = _ltp
+            _ord.unrealized_pnl = _upnl
+            _ord.save(update_fields=["current_price", "unrealized_pnl", "updated_at"])
+            by_user.setdefault(_ord.user_id, []).append((_ord, _upnl))
+
+        # Throttled WS push per user
+        now = time.time()
+        for user_id, order_pairs in by_user.items():
+            if now - _last_order_push.get(user_id, 0) < PNL_PUSH_INTERVAL:
+                continue
+            _last_order_push[user_id] = now
+            total_unrealized = sum(float(u) for _, u in order_pairs)
+            order_payloads = [
+                {
+                    "order_id":       str(o.id),
+                    "symbol":         _display,
+                    "side":           o.side,
+                    "mode":           o.mode,
+                    "quantity":       float(o.quantity),
+                    "entry_price":    float(o.entry_price),
+                    "current_price":  float(_ltp),
+                    "unrealized_pnl": float(u),
+                }
+                for o, u in order_pairs
+            ]
+            push_pnl_update(
+                user_id=user_id,
+                data={
+                    "orders":               order_payloads,
+                    "total_unrealized_pnl": total_unrealized,
+                    "ts":                   int(now),
+                },
+            )
+            logger.debug(
+                "order pnl_update | user=%s | symbol=%s | total=%.2f",
+                user_id, _display, total_unrealized,
+            )
+    except Exception as _pe:
+        logger.error("_update_open_order_pnl | %s | %s", symbol, _pe)
 
 
 def _update_position_pnl(symbol: str, ltp: float):

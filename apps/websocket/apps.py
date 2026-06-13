@@ -36,6 +36,26 @@ class WebsocketConfig(AppConfig):
                 from apps.websocket.delta_feed import delta_feed_manager
                 delta_feed_manager.start()
                 logger.info("🚀 Delta feed auto-started")
+                # Auto-subscribe open crypto order symbols so ticks arrive
+                # without needing a Flutter WS client to manually subscribe.
+                _display_to_delta = {
+                    "BTCUSD": "BTC-USDT", "ETHUSD": "ETH-USDT",
+                    "SOLUSD": "SOL-USDT", "BNBUSD": "BNB-USDT",
+                    "XRPUSD": "XRP-USDT", "DOGEUSD": "DOGE-USDT",
+                    "ADAUSD": "ADA-USDT", "AVAXUSD": "AVAX-USDT",
+                }
+                from apps.orders.models import Order
+                open_displays = (
+                    Order.objects.filter(status="open")
+                    .exclude(symbol_display="")
+                    .values_list("symbol_display", flat=True)
+                    .distinct()
+                )
+                for sym in open_displays:
+                    delta_sym = _display_to_delta.get(sym.upper())
+                    if delta_sym:
+                        delta_feed_manager.subscribe(delta_sym)
+                        logger.info(f"Delta auto-subscribed for open order: {delta_sym}")
             except Exception as e:
                 logger.error(f"Delta auto-start error: {e}")
             try:
